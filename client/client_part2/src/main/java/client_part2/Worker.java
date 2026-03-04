@@ -106,7 +106,7 @@ public class Worker implements Runnable {
                 for (String line : batch) {
                     if (line.isEmpty()) continue;
                     
-                    boolean isOk = line.contains("\"status\":\"OK\"");
+                    boolean isOk = line.contains("\"status\":\"OK\"") || line.contains("\"status\":\"QUEUED\"");
                     boolean isError = line.contains("\"status\":\"ERROR\"");
                     
                     if (isError && !loggedFirstError) {
@@ -114,10 +114,10 @@ public class Worker implements Runnable {
                         System.err.println("[Worker] First server ERROR response: " + line);
                     }
 
-                    // 每一行响应都尝试匹配一个在途请求，确保 pendingSends 与 permit 不泄漏
+                    // Try to match each response with an in-flight request, ensure pendingSends and permit are not leaked
                     SentRecord rec = pendingSends.poll();
                     if (rec == null) {
-                        // 没有对应的发送记录，可能是服务器额外的广播/日志，直接忽略
+                        // No corresponding send record, possibly server's extra broadcast/log, ignore
                         continue;
                     }
 
@@ -130,11 +130,11 @@ public class Worker implements Runnable {
                     String statusCode = isOk ? "OK" : (isError ? "ERROR" : "UNKNOWN");
                     
                     if (isOk) {
-                        // 正常业务成功
+                        // Normal business success
                         successCount.incrementAndGet();
                         metrics.recordSuccessWithDetails(roomId, msgType, latencyMs);
                     } else {
-                        // 非 OK（包括 ERROR 或无法识别的响应）视为发送失败
+                        // Non OK (including ERROR or unknown response)
                         metrics.recordFail();
                         if (isError) {
                             metrics.recordBusinessError();
@@ -309,10 +309,10 @@ public class Worker implements Runnable {
                             
                             WebSocketClient newClient = connectWithRetry(uri, pipelinePermits, pendingSends, successCount, lastResponseTimeMs);
                             if (newClient == null) {
-                                // 重连失败：标记所有待发送消息为失败并退出 worker
+                                // Reconnection failed: mark all pending messages as failed and exit worker
                                 System.err.println("[Worker] Reconnection failed for room " + roomId + ", exiting worker (queue size: " + queue.size() + 
                                     ", re-queued: " + (toReQueue.size() + (currentMsgIdx != -1 ? batch.size() - currentMsgIdx : 0)) + " msgs)");
-                                // 已经 re-queue 的消息会在其他 worker 处理，这里只需要标记当前 batch 中未发送的消息为失败
+                                // Messages that have been re-queued will be processed by other workers, here we only need to mark the messages in the current batch that have not been sent as failed
                                 for (int k = currentMsgIdx; k < batch.size(); k++) {
                                     metrics.recordFail();
                                 }

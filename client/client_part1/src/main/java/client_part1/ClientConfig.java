@@ -4,8 +4,8 @@ import java.io.InputStream;
 import java.util.Properties;
 
 /**
- * 从 client.properties 读取可调参数，未配置项使用默认值。
- * 修改 src/main/resources/client.properties 即可调参，无需改代码。
+ * Read configurable parameters from client.properties, use default values for un-configured items.
+ * Modify src/main/resources/client.properties to adjust parameters, no need to modify code.
  */
 public final class ClientConfig {
 
@@ -42,7 +42,7 @@ public final class ClientConfig {
         return out;
     }
 
-    // ----- Main 使用的参数 -----
+    // ----- Parameters used by Main -----
     public static int getWarmupThreads() { return getInt("warmup.threads", 32); }
     public static int getWarmupMessagesPerThread() { return getInt("warmup.messagesPerThread", 1000); }
     public static int getMainThreads() { return getInt("main.threads", 64); }
@@ -51,7 +51,7 @@ public final class ClientConfig {
     public static int getConnectionStaggerEvery() { return getInt("connection.staggerEvery", 8); }
     public static int getConnectionStaggerMs() { return getInt("connection.staggerMs", 80); }
 
-    // ----- Worker 使用的参数（与 Part2 一致以提升吞吐） -----
+    // ----- Parameters used by Worker (same as Part2 to improve throughput) -----
     public static int getPipelineSize() { return getInt("worker.pipelineSize", 2000); }
     public static int getBatchSize() { return getInt("worker.batchSize", 250); }
     public static long getEchoTimeoutMs() { return getLong("worker.echoTimeoutMs", 15_000); }

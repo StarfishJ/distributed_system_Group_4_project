@@ -4,6 +4,7 @@ client_part2\Worker.class
 client_part2\MessageGenerator$RandomSet.class
 client_part2\Worker$SentRecord.class
 client_part2\MessageGenerator.class
-client.properties
+client_part2\ChatClientMain$ThroughputDataPoint.class
+client_part2\ChatClientMain.class
 client_part2\ClientConfig.class
 client_part2\Worker$1.class
