@@ -106,7 +106,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         if (finalBatch.isEmpty()) return Mono.empty();
                         return session.send(Mono.just(session.textMessage(finalBatch)));
                     });
-                }, 256) // High concurrency: Phase 1 sync guarantees state correctness
+                }, 8) // Concurrency 8 per session: 64 sessions × 8 = 512 max, fits in channel pool
                 .then();
     }
 
