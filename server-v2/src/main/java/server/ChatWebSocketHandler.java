@@ -105,7 +105,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         }
                     })
                     .then();
-                }, 16) // Higher concurrency OK: slots freed immediately after MQ publish
+                }, 4) // 64 sessions × 4 = 256 max concurrent MQ publishes, natural rate limit
                 .then();
     }
 
