@@ -28,13 +28,11 @@ import reactor.core.scheduler.Schedulers;
 public class ChatWebSocketHandler implements WebSocketHandler {
     private static final Logger logger = LoggerFactory.getLogger(ChatWebSocketHandler.class);
     private final MessagePublisher publisher;
-    private final RoomManager roomManager;
     private final ConcurrentHashMap<String, Set<String>> roomToJoinedUsers = new ConcurrentHashMap<>();
     private static final JsonFactory JSON_FACTORY = new JsonFactory();
 
-    public ChatWebSocketHandler(MessagePublisher publisher, RoomManager roomManager) {
+    public ChatWebSocketHandler(MessagePublisher publisher) {
         this.publisher = publisher;
-        this.roomManager = roomManager;
     }
 
     private Set<String> joinedUsersForRoom(String roomId) {
@@ -58,12 +56,6 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         String path = session.getHandshakeInfo().getUri().getPath();
         String roomId = roomIdFromPath(path);
 
-        // NOTE: We intentionally do NOT register this session for broadcast via RoomManager.
-        // The test client uses a single WebSocket for send+receive. If we broadcast
-        // messages back on this same WebSocket, the client receives unexpected frames
-        // (the full message JSON) mixed in with ACK responses, causing "no response" failures.
-        // The broadcast architecture (ServerMessageConsumer → MessageBroadcaster → RoomManager)
-        // remains intact for dedicated receive-only WebSocket connections.
 
         return session.receive()
                 .flatMap(msg -> {
