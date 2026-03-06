@@ -84,8 +84,11 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                     // State is already consistent, so this can safely run concurrently.
                     String batchStr = batch.toString();
                     if (publishTasks.isEmpty()) {
-                        if (batchStr.isEmpty()) return Mono.empty();
-                        return session.send(Mono.just(session.textMessage(batchStr)));
+                        // No MQ work needed — send ACK directly (fire-and-forget)
+                        if (!batchStr.isEmpty()) {
+                            session.send(Mono.just(session.textMessage(batchStr))).subscribe();
+                        }
+                        return Mono.empty();
                     }
                     return Mono.fromCallable(() -> {
                         for (PublishTask task : publishTasks) {
@@ -94,11 +97,15 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         return batchStr;
                     })
                     .subscribeOn(Schedulers.boundedElastic())
-                    .flatMap(finalBatch -> {
-                        if (finalBatch.isEmpty()) return Mono.empty();
-                        return session.send(Mono.just(session.textMessage(finalBatch)));
-                    });
-                }, 8) // Concurrency 8 per session: 64 sessions × 8 = 512 max, fits in channel pool
+                    .doOnNext(finalBatch -> {
+                        // Fire-and-forget ACK: frees flatMap slot immediately after MQ publish,
+                        // instead of blocking until Netty event loop writes the frame.
+                        if (!finalBatch.isEmpty()) {
+                            session.send(Mono.just(session.textMessage(finalBatch))).subscribe();
+                        }
+                    })
+                    .then();
+                }, 16) // Higher concurrency OK: slots freed immediately after MQ publish
                 .then();
     }
 
