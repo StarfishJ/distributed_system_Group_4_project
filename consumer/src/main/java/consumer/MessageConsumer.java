@@ -38,8 +38,15 @@ public class MessageConsumer {
         this.metrics = metrics;
     }
 
-    @RabbitListener(queues = "#{@nodeQueue.getName()}", ackMode = "MANUAL")
-    public void consumeNodeQueue(ClientMessage message, Channel channel,
+    /**
+     * Listen on all 20 room queues directly.
+     * Spring dynamically creates one consumer per queue, distributing load across threads.
+     */
+    @RabbitListener(queues = {"room.1","room.2","room.3","room.4","room.5",
+            "room.6","room.7","room.8","room.9","room.10",
+            "room.11","room.12","room.13","room.14","room.15",
+            "room.16","room.17","room.18","room.19","room.20"}, ackMode = "MANUAL")
+    public void consumeRoomQueue(ClientMessage message, Channel channel,
                                  @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag,
                                  Message amqpMessage) {
         String roomId = message.roomId();
