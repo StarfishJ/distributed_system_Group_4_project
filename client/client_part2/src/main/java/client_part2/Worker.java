@@ -109,15 +109,20 @@ public class Worker implements Runnable {
                     boolean isOk = line.contains("\"status\":\"OK\"") || line.contains("\"status\":\"QUEUED\"");
                     boolean isError = line.contains("\"status\":\"ERROR\"");
                     
+                    // FIX: Only poll and calculate latency if this is a status response from the server.
+                    // Broadcast messages (which lack "status") should be ignored.
+                    if (!isOk && !isError) {
+                        continue;
+                    }
+
                     if (isError && !loggedFirstError) {
                         loggedFirstError = true;
                         System.err.println("[Worker] First server ERROR response: " + line);
                     }
 
-                    // Try to match each response with an in-flight request, ensure pendingSends and permit are not leaked
+                    // Try to match each status response with an in-flight request
                     SentRecord rec = pendingSends.poll();
                     if (rec == null) {
-                        // No corresponding send record, possibly server's extra broadcast/log, ignore
                         continue;
                     }
 
@@ -130,18 +135,15 @@ public class Worker implements Runnable {
                     String statusCode = isOk ? "OK" : (isError ? "ERROR" : "UNKNOWN");
                     
                     if (isOk) {
-                        // Normal business success
                         successCount.incrementAndGet();
                         metrics.recordSuccessWithDetails(roomId, msgType, latencyMs);
                     } else {
-                        // Non OK (including ERROR or unknown response)
                         metrics.recordFail();
                         if (isError) {
                             metrics.recordBusinessError();
                         }
                     }
                     
-                    // Record detailed per-message metrics for CSV export
                     metrics.recordMessageMetric(now, msgType, latencyMs, statusCode, roomId);
                 }
             }
@@ -358,6 +360,10 @@ public class Worker implements Runnable {
                 if (batchBuilder.length() > 0 && client.isOpen()) {
                     try {
                         client.send(batchBuilder.toString());
+                        long throttleMs = ClientConfig.getThrottleMs();
+                        if (throttleMs > 0) {
+                            if (sleepMs(throttleMs)) break;
+                        }
                     } catch (Exception e) {
                         // If send fails, the messages will eventually time out or connection will close
                     }

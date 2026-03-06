@@ -1,0 +1,16 @@
+[Unit]
+Description=Chat Consumer Service
+After=network.target rabbitmq-server.service
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/consumer
+ExecStart=/usr/bin/java -Dconsumer.rooms=* -Dspring.rabbitmq.host=localhost -jar chat-consumer.jar
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=chat-consumer
+
+[Install]
+WantedBy=multi-user.target

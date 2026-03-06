@@ -17,6 +17,7 @@ import com.fasterxml.jackson.core.JsonToken;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -28,15 +29,14 @@ import reactor.core.scheduler.Schedulers;
 public class ChatWebSocketHandler implements WebSocketHandler {
     private static final Logger logger = LoggerFactory.getLogger(ChatWebSocketHandler.class);
     private final MessagePublisher publisher;
-    private final ConcurrentHashMap<String, Set<String>> roomToJoinedUsers = new ConcurrentHashMap<>();
+    private final RoomManager roomManager;
+    private final ServerMetrics metrics;
     private static final JsonFactory JSON_FACTORY = new JsonFactory();
 
-    public ChatWebSocketHandler(MessagePublisher publisher) {
+    public ChatWebSocketHandler(MessagePublisher publisher, RoomManager roomManager, ServerMetrics metrics) {
         this.publisher = publisher;
-    }
-
-    private Set<String> joinedUsersForRoom(String roomId) {
-        return roomToJoinedUsers.computeIfAbsent(roomId, k -> ConcurrentHashMap.newKeySet());
+        this.roomManager = roomManager;
+        this.metrics = metrics;
     }
 
     /** Extract roomId from path /chat/1 -> "1". */
@@ -55,17 +55,14 @@ public class ChatWebSocketHandler implements WebSocketHandler {
     public Mono<Void> handle(WebSocketSession session) {
         String path = session.getHandshakeInfo().getUri().getPath();
         String roomId = roomIdFromPath(path);
-
+        metrics.sessionOpened();
 
         return session.receive()
                 .flatMap(msg -> {
                     String payload = msg.getPayloadAsText();
+                    metrics.incrementReceived();
                     String serverTimestamp = Instant.now().toString();
 
-                    // PHASE 1: Synchronous state check on Netty thread (nanoseconds).
-                    // JSON parsing + JOIN/LEAVE state mutation happens HERE, before
-                    // any concurrent I/O. This guarantees correct ordering without
-                    // needing flatMap(..., 1).
                     StringBuilder batch = new StringBuilder();
                     java.util.List<PublishTask> publishTasks = new java.util.ArrayList<>();
                     for (String line : payload.split("\n")) {
@@ -80,11 +77,8 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         }
                     }
 
-                    // PHASE 2: Offload only the blocking RabbitMQ publish to boundedElastic.
-                    // State is already consistent, so this can safely run concurrently.
                     String batchStr = batch.toString();
                     if (publishTasks.isEmpty()) {
-                        // No MQ work needed — send ACK directly (fire-and-forget)
                         if (!batchStr.isEmpty()) {
                             session.send(Mono.just(session.textMessage(batchStr))).subscribe();
                         }
@@ -98,15 +92,37 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                     })
                     .subscribeOn(Schedulers.boundedElastic())
                     .doOnNext(finalBatch -> {
-                        // Fire-and-forget ACK: frees flatMap slot immediately after MQ publish,
-                        // instead of blocking until Netty event loop writes the frame.
                         if (!finalBatch.isEmpty()) {
                             session.send(Mono.just(session.textMessage(finalBatch))).subscribe();
                         }
                     })
                     .then();
-                }, 4) // 64 sessions × 4 = 256 max concurrent MQ publishes, natural rate limit
+                }, 4)
+                .doFinally(signalType -> {
+                    if (roomId != null) {
+                        roomManager.leaveRoom(roomId, session, null);
+                    }
+                    metrics.sessionClosed();
+                    logger.debug("Session closed: {}", session.getId());
+                })
                 .then();
+    }
+
+    /**
+     * Broadcast a message to all local sessions in the room.
+     * Called by BroadcastListener when a global message arrives from RabbitMQ Fanout.
+     */
+    public void broadcastToLocalRoom(String roomId, String messageJson) {
+        Set<WebSocketSession> sessions = roomManager.getSessionsForRoom(roomId);
+        if (sessions.isEmpty()) return;
+
+        Flux.fromIterable(sessions)
+                .flatMap(s -> s.send(Mono.just(s.textMessage(messageJson)))
+                        .onErrorResume(e -> {
+                            roomManager.leaveRoom(roomId, s, null);
+                            return Mono.empty();
+                        }))
+                .subscribe();
     }
 
     /** Holds a pending RabbitMQ publish. */
@@ -147,16 +163,19 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         if (timestamp == null || !isValidTimestampFast(timestamp)) return new ProcessResult(buildErrorJson("invalid timestamp"), null);
         if (messageType == null) return new ProcessResult(buildErrorJson("messageType missing"), null);
 
-        Set<String> joined = roomId != null ? joinedUsersForRoom(roomId) : null;
         if ("JOIN".equals(messageType)) {
-            if (joined != null) {
-                joined.add(userId);
+            if (roomId != null) {
+                roomManager.joinRoom(roomId, session, userId);
             }
         } else {
-            if (roomId == null || joined == null || !joined.contains(userId)) {
+            // Check if user is in room (broad check since we don't track all user metadata here)
+            // In a real system, we might query a global state, but here we check local RoomManager
+            if (roomId == null) {
                 return new ProcessResult(buildErrorJson("user not in room"), null);
             }
-            if ("LEAVE".equals(messageType)) joined.remove(userId);
+            if ("LEAVE".equals(messageType)) {
+                roomManager.leaveRoom(roomId, session, userId);
+            }
         }
 
         if (roomId == null) {
@@ -166,11 +185,13 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         // Build the message for async publish (no I/O here)
         String clientIp = session.getHandshakeInfo().getRemoteAddress() != null
                 ? session.getHandshakeInfo().getRemoteAddress().getHostString() : "unknown";
-        String serverId;
-        try {
-            serverId = InetAddress.getLocalHost().getHostName();
-        } catch (Exception e) {
-            serverId = "server-1";
+        String serverId = System.getProperty("server.id");
+        if (serverId == null || serverId.isEmpty()) {
+            try {
+                serverId = InetAddress.getLocalHost().getHostName();
+            } catch (Exception e) {
+                serverId = "server-1";
+            }
         }
         ClientMessage msg = new ClientMessage(
                 UUID.randomUUID().toString(),

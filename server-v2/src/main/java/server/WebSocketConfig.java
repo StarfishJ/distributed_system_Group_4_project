@@ -27,8 +27,8 @@ public class WebSocketConfig {
     }
 
     @Bean
-    public WebSocketHandler chatWebSocketHandler(MessagePublisher publisher) {
-        return new ChatWebSocketHandler(publisher);
+    public ChatWebSocketHandler chatWebSocketHandler(MessagePublisher publisher, RoomManager roomManager, ServerMetrics metrics) {
+        return new ChatWebSocketHandler(publisher, roomManager, metrics);
     }
 
     @Bean

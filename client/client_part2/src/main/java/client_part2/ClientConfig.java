@@ -58,5 +58,6 @@ public final class ClientConfig {
     public static long getAcquireLoopTimeoutMs() { return getLong("worker.acquireLoopTimeoutMs", 30_000); }
     public static int getConnectTimeoutSec() { return getInt("worker.connectTimeoutSec", 10); }
     public static int getMaxConnectRetries() { return getInt("worker.maxConnectRetries", 10); }
+    public static long getThrottleMs() { return getLong("worker.throttleMs", 0); }
     public static long[] getBackoffMs() { return getLongArray("worker.backoffMs", new long[] { 500, 1000, 2000, 4000, 8000 }); }
 }

@@ -31,6 +31,7 @@ public class RabbitMQConfig {
     public static final String EXCHANGE_NAME = "chat.exchange";
     public static final String DLX_EXCHANGE = "chat.dlx";
     public static final String DLQ_NAME = "chat.dead-letter";
+    public static final String BROADCAST_EXCHANGE = "chat.broadcast";
 
     @Bean
     public MessageConverter jsonMessageConverter() {
@@ -45,6 +46,24 @@ public class RabbitMQConfig {
     @Bean
     public FanoutExchange deadLetterExchange() {
         return new FanoutExchange(DLX_EXCHANGE, true, false);
+    }
+
+    @Bean
+    public FanoutExchange broadcastExchange() {
+        return new FanoutExchange(BROADCAST_EXCHANGE, false, true); // Non-durable, auto-delete for performance
+    }
+
+    @Bean
+    public Queue anonymousBroadcastQueue() {
+        return QueueBuilder.nonDurable() // Non-durable for performance
+                .autoDelete()
+                .exclusive()
+                .build();
+    }
+
+    @Bean
+    public Binding broadcastBinding(Queue anonymousBroadcastQueue, FanoutExchange broadcastExchange) {
+        return BindingBuilder.bind(anonymousBroadcastQueue).to(broadcastExchange);
     }
 
     @Bean

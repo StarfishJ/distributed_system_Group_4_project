@@ -1,0 +1,16 @@
+[Unit]
+Description=Chat Server Node
+After=network.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/server-v2
+ExecStart=/usr/bin/java -Dspring.rabbitmq.host=YOUR_RABBITMQ_IP -jar chat-server.jar
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=chat-server
+
+[Install]
+WantedBy=multi-user.target

@@ -1,90 +1,73 @@
-# CS6650 Assignment 1: WebSocket Chat Server and Load Testing Client
+# CS6650 Assignment 2: Distributed WebSocket Chat System
 
-This repository contains the implementation for Assignment 1, including a WebSocket chat server and two load testing clients.
+This repository contains the enhanced implementation for Assignment 2, featuring a distributed architecture with RabbitMQ, an ALB-ready server, a standalone consumer, and comprehensive monitoring.
 
 ## Repository Structure
 
 ```
 /
-|-- server/                    # Spring Boot WebSocket server implementation
-|   |-- README.md             # Server deployment and running instructions
-|   `-- src/                  # Source code
+|-- server-v2/           # Updated Server with Queue integration & Broadcast logic
+|-- consumer/            # Standalone Consumer (RabbitMQ -> Broadcast Fanout)
 |-- client/
-|   |-- client_part1/         # Basic load testing client
-|   |   |-- README.md         # Client Part 1 instructions
-|   |   |-- src/              # Source code
-|   |   `-- src/main/resources/client.properties  # Configuration file
-|   `-- client_part2/         # Client with performance analysis
-|       |-- README.md         # Client Part 2 instructions
-|       |-- src/              # Source code
-|       `-- src/main/resources/client.properties  # Configuration file
-|-- results/                  # Test results and analysis
-|   |-- README.md             # Results documentation
-|   |-- throughput_over_time.csv  # Throughput data (10-second buckets)
-|   `-- generate_throughput_chart.py  # Chart generation script
-|-- README.md                 # Main repository README (this file)
-`-- DesignDocument.md         # Architecture and design document (2 pages max)
+|   |-- client_part2/    # Load testing client with latency/throughput analysis
+|-- monitoring/          # Python monitoring script (RabbitMQ + App Metrics)
+|-- deployment/          # systemd service files and ALB configuration notes
+|-- results/             # Test results and CSV exports
 ```
 
-## Quick Start
+## Quick Start: Common Commands
 
-### Server
-
+### 1. Build All Modules
 ```bash
-cd server
-mvn clean package
-java -jar target/chat-server-0.0.1-SNAPSHOT.jar
+# Build Server, Consumer, and Client
+mvn clean package -DskipTests -f server-v2/pom.xml
+mvn clean package -DskipTests -f consumer/pom.xml
+mvn clean package -DskipTests -f client/client_part2/pom.xml
 ```
 
-Server runs on port 8080. See `server/README.md` for detailed deployment instructions.
-
-### Client Part 1 (Basic Load Testing)
-
+### 2. Run Server-v2 (EC2/Local)
 ```bash
-cd client/client_part1
-mvn clean compile
-mvn exec:java -Dexec.args="http://your-server:8080"
+# Local (RabbitMQ on localhost)
+java -Dserver.id=Node-1 -jar server-v2/target/chat-server-0.0.1-SNAPSHOT.jar
+
+# EC2 (Connect to RabbitMQ instance)
+java -Dserver.id=EC2-Node-A -Dspring.rabbitmq.host=<RABBITMQ_IP> -jar chat-server.jar
 ```
 
-See `client/client_part1/README.md` for detailed instructions.
-
-### Client Part 2 (Performance Analysis)
-
+### 3. Run Consumer
 ```bash
-cd client/client_part2
-mvn clean compile
-mvn exec:java -Dexec.args="http://your-server:8080"
+# Local
+java -jar consumer/target/chat-consumer-0.0.1-SNAPSHOT.jar
+
+# EC2
+java -Dspring.rabbitmq.host=<RABBITMQ_IP> -jar chat-consumer.jar
 ```
 
-See `client/client_part2/README.md` for detailed instructions.
+### 4. Run Monitoring Script
+```bash
+# Monitor RabbitMQ and App nodes (Server/Consumer)
+python monitoring/monitor.py --rabbitmq-host <RMQ_IP> --server-hosts <SRV_IP1>,<SRV_IP2> --consumer-hosts <CON_IP>
+```
+
+### 5. Run Load Test (to ALB)
+```bash
+# Replace with your ALB DNS name
+java -jar client/client_part2/target/client_part2-1.0-SNAPSHOT.jar http://<ALB_DNS_NAME> 100000
+```
+
+## Verification & Health
+- **Health Check**: `GET http://<INSTANCE_IP>:8080/health`
+- **Metrics**: `GET http://<INSTANCE_IP>:8080/actuator/metrics`
+- **RabbitMQ Dashboard**: `http://<RMQ_IP>:15672` (guest/guest)
 
 ## Configuration
+- **Server**: `server-v2/src/main/resources/application.properties`
+- **Consumer**: `consumer/src/main/resources/application.properties`
+- **Client**: `client/client_part2/src/main/resources/client.properties`
 
-- **Server**: `server/src/main/resources/application.properties`
-- **Client Part 1**: `client/client_part1/src/main/resources/client.properties`
-- **Client Part 2**: `client/client_part2/src/main/resources/client.properties`
+---
 
-## Test Results
-
-Test results, screenshots, and performance analysis charts are stored in the `results/` directory.
-
-See `results/README.md` for information about:
-- Throughput data export
-- Chart generation
-- Performance analysis
-
-## Design Document
-
-See `DesignDocument.md` for:
-- Architecture diagram
-- Major classes and relationships
-- Threading model
-- WebSocket connection management
-- Little's Law calculations
-
-## Git Repository
-
-Include this repository URL in your submission:
-- Repository structure matches the structure shown above
-- All README files contain clear running instructions
-- Design document is complete and within 2 pages
+## Submission Artifacts
+- **Architecture**: [system_design.md](file:///C:/Users/james/.gemini/antigravity/brain/f523feaa-6e29-49ea-90ce-d6608463293e/system_design.md)
+- **Deployment Guide**: [alb_testing_guide.md](file:///C:/Users/james/.gemini/antigravity/brain/f523feaa-6e29-49ea-90ce-d6608463293e/alb_testing_guide.md)
+- **Final Report**: [walkthrough.md](file:///C:/Users/james/.gemini/antigravity/brain/f523feaa-6e29-49ea-90ce-d6608463293e/walkthrough.md)

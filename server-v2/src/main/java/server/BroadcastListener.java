@@ -1,0 +1,39 @@
+package server;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.stereotype.Component;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+/**
+ * Broadcast Listener: listens on the anonymous fanout queue to receive
+ * messages from the global Consumer and pushes them to local clients.
+ */
+@Component
+public class BroadcastListener {
+    private static final Logger logger = LoggerFactory.getLogger(BroadcastListener.class);
+    private final ChatWebSocketHandler handler;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    public BroadcastListener(ChatWebSocketHandler handler) {
+        this.handler = handler;
+    }
+
+    /**
+     * Listen on the anonymous auto-delete queue.
+     * concurrency can be tuned via 'server.broadcast.concurrency' property.
+     */
+    @RabbitListener(queues = "#{anonymousBroadcastQueue.name}", 
+                    concurrency = "${server.broadcast.concurrency:10}")
+    public void onBroadcastMessage(ClientMessage message) {
+        try {
+            logger.debug("Received broadcast: msgId={}, room={}", message.messageId(), message.roomId());
+            String json = objectMapper.writeValueAsString(message);
+            handler.broadcastToLocalRoom(message.roomId(), json);
+        } catch (Exception e) {
+            logger.error("Failed to process broadcast message", e);
+        }
+    }
+}

@@ -28,6 +28,7 @@ public class RabbitMQConfig {
     public static final String EXCHANGE_NAME = "chat.exchange";
     public static final String DLX_EXCHANGE = "chat.dlx";
     public static final String DLQ_NAME = "chat.dead-letter";
+    public static final String BROADCAST_EXCHANGE = "chat.broadcast";
     public static final int ROOM_COUNT = 20;
 
     @Bean
@@ -43,6 +44,11 @@ public class RabbitMQConfig {
     @Bean
     public FanoutExchange deadLetterExchange() {
         return new FanoutExchange(DLX_EXCHANGE, true, false);
+    }
+
+    @Bean
+    public FanoutExchange broadcastExchange() {
+        return new FanoutExchange(BROADCAST_EXCHANGE, false, true); // Transient, auto-delete for performance
     }
 
     @Bean
@@ -77,15 +83,33 @@ public class RabbitMQConfig {
         return new Declarables(declarables);
     }
 
+    @org.springframework.beans.factory.annotation.Value("${consumer.rooms:*}")
+    private String roomRange;
+
     /**
      * Generate the list of room queue names for @RabbitListener.
+     * Supports "specific rooms" and "fair distribution" as per Assignment 2.
+     * Use "*" for all rooms, or "1-10", "11-20" for sharding.
      */
     @Bean
     public String[] roomQueueNames() {
-        String[] names = new String[ROOM_COUNT];
-        for (int i = 0; i < ROOM_COUNT; i++) {
-            names[i] = "room." + (i + 1);
+        if ("*".equals(roomRange)) {
+            String[] names = new String[ROOM_COUNT];
+            for (int i = 0; i < ROOM_COUNT; i++) names[i] = "room." + (i + 1);
+            return names;
         }
-        return names;
+        
+        try {
+            String[] parts = roomRange.split("-");
+            int start = Integer.parseInt(parts[0]);
+            int end = Integer.parseInt(parts[1]);
+            List<String> list = new ArrayList<>();
+            for (int i = start; i <= end; i++) {
+                if (i >= 1 && i <= ROOM_COUNT) list.add("room." + i);
+            }
+            return list.toArray(new String[0]);
+        } catch (Exception e) {
+            return new String[]{"room.1"}; // Fallback
+        }
     }
 }

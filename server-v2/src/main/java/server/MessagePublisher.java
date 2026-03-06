@@ -17,11 +17,12 @@ public class MessagePublisher {
 
     private final RabbitTemplate rabbitTemplate;
     private final CircuitBreaker circuitBreaker;
+    private final ServerMetrics metrics;
 
-    // CircuitBreakerRegistry is a registry of circuit breakers
-    public MessagePublisher(RabbitTemplate rabbitTemplate, CircuitBreakerRegistry registry) {
+    public MessagePublisher(RabbitTemplate rabbitTemplate, CircuitBreakerRegistry registry, ServerMetrics metrics) {
         this.rabbitTemplate = rabbitTemplate;
         this.circuitBreaker = registry.circuitBreaker(CIRCUIT_BREAKER_NAME);
+        this.metrics = metrics;
 
         // Publisher confirm callback: log when broker nacks a message
         this.rabbitTemplate.setConfirmCallback((correlationData, ack, cause) -> {
@@ -49,12 +50,15 @@ public class MessagePublisher {
         try {
             circuitBreaker.executeRunnable(() ->
                 rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, "room." + roomId, message));
+            metrics.incrementPublished();
             return true;
         } catch (CallNotPermittedException e) {
             log.warn("Circuit breaker OPEN - queue unavailable, message dropped: roomId={}", roomId);
+            metrics.incrementPublishError();
             return false;
         } catch (Exception e) {
             log.error("Failed to publish to RabbitMQ: roomId={}, error={}", roomId, e.getMessage());
+            metrics.incrementPublishError();
             return false;
         }
     }
