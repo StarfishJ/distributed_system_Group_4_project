@@ -73,36 +73,42 @@ public class MessageConsumer {
     /**
      * Listen on rooms defined in RabbitMQConfig.roomQueueNames bean.
      * This allows running multiple Consumer instances each handling a subset of rooms.
+     * Accepts both individual ClientMessage and List<ClientMessage> (Upstream Batching).
      */
     @RabbitListener(queues = "#{roomQueueNames}", ackMode = "MANUAL")
-    public void consumeRoomQueue(ClientMessage message, Channel channel,
+    public void consumeRoomQueue(Object payload, Channel channel,
                                  @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag) {
-        
-        String msgId = message.messageId();
-        
-        // Idempotency: Atomic Duplicate detection via Caffeine Cache
-        if (msgId != null && processedIds.asMap().putIfAbsent(msgId, Boolean.TRUE) != null) {
-            try {
-                channel.basicAck(deliveryTag, false);
-                return;
-            } catch (Exception e) {
-                log.error("Failed to ACK duplicate message", e);
-                return;
-            }
-        }
-
         try {
-            // Add to batch instead of direct send
-            batchQueue.add(message);
-            
-            // ACK original message from room queue immediately (at-least-once for the batch buffer)
+            if (payload instanceof List) {
+                @SuppressWarnings("unchecked")
+                List<ClientMessage> messages = (List<ClientMessage>) payload;
+                for (ClientMessage msg : messages) {
+                    processSingleMessage(msg);
+                }
+            } else if (payload instanceof ClientMessage) {
+                processSingleMessage((ClientMessage) payload);
+            }
+
+            // ACK original message or batch from room queue
             channel.basicAck(deliveryTag, false);
         } catch (Exception e) {
-            log.error("Failed to process message: msgId={}", msgId, e);
+            log.error("Failed to process message/batch: error={}", e.getMessage());
             try {
                 channel.basicReject(deliveryTag, false);
             } catch (Exception re) { }
         }
+    }
+
+    private void processSingleMessage(ClientMessage message) {
+        String msgId = message.messageId();
+        
+        // Idempotency: Atomic Duplicate detection via Caffeine Cache
+        if (msgId != null && processedIds.asMap().putIfAbsent(msgId, Boolean.TRUE) != null) {
+            return;
+        }
+
+        // Add to batch instead of direct send
+        batchQueue.add(message);
     }
 
     private synchronized void flushBatch() {

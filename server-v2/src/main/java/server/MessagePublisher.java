@@ -14,52 +14,82 @@ public class MessagePublisher {
 
     private static final Logger log = LoggerFactory.getLogger(MessagePublisher.class);
     private static final String CIRCUIT_BREAKER_NAME = "rabbitmq";
+    private static final int MAX_BATCH_SIZE = 100;
+    private static final long FLUSH_INTERVAL_MS = 30;
 
     private final RabbitTemplate rabbitTemplate;
     private final CircuitBreaker circuitBreaker;
     private final ServerMetrics metrics;
+    private final java.util.concurrent.ScheduledExecutorService scheduler = 
+            java.util.concurrent.Executors.newScheduledThreadPool(2);
+    
+    private final java.util.concurrent.ConcurrentHashMap<String, RoomBuffer> roomBuffers = 
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static class RoomBuffer {
+        final java.util.List<ClientMessage> messages = new java.util.ArrayList<>();
+        boolean timerActive = false;
+    }
 
     public MessagePublisher(RabbitTemplate rabbitTemplate, CircuitBreakerRegistry registry, ServerMetrics metrics) {
         this.rabbitTemplate = rabbitTemplate;
         this.circuitBreaker = registry.circuitBreaker(CIRCUIT_BREAKER_NAME);
         this.metrics = metrics;
 
-        // Publisher confirm callback: log when broker nacks a message
         this.rabbitTemplate.setConfirmCallback((correlationData, ack, cause) -> {
             if (!ack) {
                 log.error("Message NOT confirmed by broker (nack): cause={}, correlationData={}", cause, correlationData);
             }
         });
 
-        // Return callback: log when a message cannot be routed to any queue
         this.rabbitTemplate.setReturnsCallback(returned -> {
             log.error("Message RETURNED (unroutable): exchange={}, routingKey={}, replyText={}",
                     returned.getExchange(), returned.getRoutingKey(), returned.getReplyText());
         });
 
-        // Mandatory=true: trigger return callback for unroutable messages (instead of silent drop)
         this.rabbitTemplate.setMandatory(true);
     }
 
-    /**
-     * Publish message to RabbitMQ. Protected by circuit breaker - when queue is unavailable,
-     * fails fast instead of overwhelming the system.
-     * @return true if published, false if circuit open or publish failed
-     */
     public boolean publishMessage(String roomId, ClientMessage message) {
+        RoomBuffer buffer = roomBuffers.computeIfAbsent(roomId, k -> new RoomBuffer());
+        
+        synchronized (buffer) {
+            buffer.messages.add(message);
+            
+            if (buffer.messages.size() >= MAX_BATCH_SIZE) {
+                flush(roomId, buffer);
+            } else if (!buffer.timerActive) {
+                buffer.timerActive = true;
+                scheduler.schedule(() -> {
+                    synchronized (buffer) {
+                        flush(roomId, buffer);
+                    }
+                }, FLUSH_INTERVAL_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+        }
+        return true; // Acknowledgement is async now
+    }
+
+    private void flush(String roomId, RoomBuffer buffer) {
+        if (buffer.messages.isEmpty()) {
+            buffer.timerActive = false;
+            return;
+        }
+
+        java.util.List<ClientMessage> batch = new java.util.ArrayList<>(buffer.messages);
+        buffer.messages.clear();
+        buffer.timerActive = false;
+
         try {
             circuitBreaker.executeRunnable(() ->
-                rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, "room." + roomId, message));
+                rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, "room." + roomId, batch));
             metrics.incrementPublished();
-            return true;
         } catch (CallNotPermittedException e) {
-            log.warn("Circuit breaker OPEN - queue unavailable, message dropped: roomId={}", roomId);
+            log.warn("Circuit breaker OPEN - batch dropped: roomId={}", roomId);
             metrics.incrementPublishError();
-            return false;
         } catch (Exception e) {
-            log.error("Failed to publish to RabbitMQ: roomId={}, error={}", roomId, e.getMessage());
+            log.error("Failed to publish batch to RabbitMQ: roomId={}, error={}", roomId, e.getMessage());
             metrics.incrementPublishError();
-            return false;
         }
     }
 }

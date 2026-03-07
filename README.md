@@ -60,6 +60,64 @@ java -jar client/client_part2/target/client_part2-1.0-SNAPSHOT.jar http://<ALB_D
 - **Metrics**: `GET http://<INSTANCE_IP>:8080/actuator/metrics`
 - **RabbitMQ Dashboard**: `http://<RMQ_IP>:15672` (guest/guest)
 
+## EC2 Deployment Workflow
+
+Since the code is already pushed to GitHub, follow these steps to deploy to your AWS instances:
+
+### 1. SSH into the Instance
+```bash
+ssh -i "your-key.pem" ec2-user@<INSTANCE_PUBLIC_IP>
+```
+
+### 2. Update and Deploy Server-v2 (Run on all 4 Server Nodes)
+```bash
+cd ~/Distributed-System-Assignment-1
+git pull
+sudo ./deployment/deploy-server.sh <RABBITMQ_PRIVATE_IP>
+```
+*Note: This script handles building, creating a systemd service, and starting the server.*
+
+### 3. Update and Deploy Consumer (Run on Consumer Node)
+```bash
+cd ~/Distributed-System-Assignment-1
+git pull
+./deployment/deploy-consumer.sh <RABBITMQ_PRIVATE_IP>
+```
+*Note: This script kills the old process and starts a new one with `nohup`.*
+
+### 4. Verify on EC2
+- Check logs: `tail -f /tmp/consumer.log` or `journalctl -u chat-server -f`
+- Check health: `curl http://localhost:8080/health`
+
+---
+
+## 🛠 Manual Deployment Cheat Sheet (No Scripts)
+
+If you prefer manual commands due to changing IPs, use these (run after `mvn clean package`):
+
+### **Server-v2 (Run on 4 Nodes)**
+Copy-paste this (replace `<MQ_IP>`):
+```bash
+nohup java -Xmx1g \
+  -Dserver.id=Node-1 \
+  -Dspring.rabbitmq.host=<RABBITMQ_PRIVATE_IP_HERE> \
+  -jar server-v2/target/chat-server-0.0.1-SNAPSHOT.jar \
+  > ~/server.log 2>&1 &
+```
+*(Change `Node-1` to 2, 3, 4 for each instance)*
+
+### **Consumer (Run on 1 Node)**
+Copy-paste this (replace `<MQ_IP>`):
+```bash
+nohup java -Xmx2g \
+  -Dconcurrency=120 -Dmax-concurrency=120 -Dprefetch=5 \
+  -Dspring.rabbitmq.host=<RABBITMQ_PRIVATE_IP_HERE> \
+  -jar consumer/target/chat-consumer-0.0.1-SNAPSHOT.jar \
+  > /tmp/consumer.log 2>&1 &
+```
+
+---
+
 ## Configuration
 - **Server**: `server-v2/src/main/resources/application.properties`
 - **Consumer**: `consumer/src/main/resources/application.properties`
