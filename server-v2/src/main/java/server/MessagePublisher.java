@@ -31,11 +31,14 @@ public class MessagePublisher {
         boolean timerActive = false;
     }
 
+    private static final int MAX_ROOM_BUFFER_SIZE = 2000;
+
     public MessagePublisher(RabbitTemplate rabbitTemplate, CircuitBreakerRegistry registry, ServerMetrics metrics) {
         this.rabbitTemplate = rabbitTemplate;
         this.circuitBreaker = registry.circuitBreaker(CIRCUIT_BREAKER_NAME);
         this.metrics = metrics;
-        log.info("Upstream Batching enabled: maxQueue={}, flushInterval={}ms", MAX_BATCH_SIZE, FLUSH_INTERVAL_MS);
+        log.info("Upstream Batching enabled: maxQueue={}, flushInterval={}ms, maxRoomBuffer={}", 
+            MAX_BATCH_SIZE, FLUSH_INTERVAL_MS, MAX_ROOM_BUFFER_SIZE);
 
         this.rabbitTemplate.setConfirmCallback((correlationData, ack, cause) -> {
             if (!ack) {
@@ -51,10 +54,23 @@ public class MessagePublisher {
         this.rabbitTemplate.setMandatory(true);
     }
 
+    /**
+     * @return true if accepted, false if rejected due to overflow or open circuit breaker.
+     */
     public boolean publishMessage(String roomId, ClientMessage message) {
+        // 1. Check Circuit Breaker upfront (Backpressure)
+        if (!circuitBreaker.tryAcquirePermission()) {
+            return false;
+        }
+
         RoomBuffer buffer = roomBuffers.computeIfAbsent(roomId, k -> new RoomBuffer());
         
         synchronized (buffer) {
+            // 2. Check Buffer Limit (Backpressure)
+            if (buffer.messages.size() >= MAX_ROOM_BUFFER_SIZE) {
+                return false;
+            }
+
             buffer.messages.add(message);
             
             if (buffer.messages.size() >= MAX_BATCH_SIZE) {
@@ -68,7 +84,7 @@ public class MessagePublisher {
                 }, FLUSH_INTERVAL_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
             }
         }
-        return true; // Acknowledgement is async now
+        return true;
     }
 
     private void flush(String roomId, RoomBuffer buffer) {
@@ -82,14 +98,14 @@ public class MessagePublisher {
         buffer.timerActive = false;
 
         try {
+            // We already checked permission in publishMessage, but we execute under CB for monitoring
             circuitBreaker.executeRunnable(() ->
                 rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, "room." + roomId, batch));
             metrics.incrementPublished();
             if (log.isDebugEnabled()) log.debug("Flushed upstream batch: room={}, size={}", roomId, batch.size());
-        } catch (CallNotPermittedException e) {
-            log.warn("Circuit breaker OPEN - batch dropped: roomId={}", roomId);
-            metrics.incrementPublishError();
         } catch (Exception e) {
+            // On error, we log but don't re-queue here to avoid infinite loops
+            // The client will handle retries because it won't get an ACK for these messages
             log.error("Failed to publish batch to RabbitMQ: roomId={}, error={}", roomId, e.getMessage());
             metrics.incrementPublishError();
         }

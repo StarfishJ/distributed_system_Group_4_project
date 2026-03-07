@@ -152,9 +152,18 @@ public class Worker implements Runnable {
                         successCount.incrementAndGet();
                         metrics.recordSuccessWithDetails(roomId, msgType, latencyMs);
                     } else {
-                        metrics.recordFail();
-                        if (isError) {
-                            metrics.recordBusinessError();
+                        if (line.contains("SERVER_BUSY")) {
+                            // Backpressure: re-queue the original message at the front
+                            if (rec.originalMsg != null) {
+                                if (!queue.offerFirst(rec.originalMsg)) {
+                                    metrics.recordFail(); // Queue full, really failed
+                                }
+                            }
+                        } else {
+                            metrics.recordFail();
+                            if (isError) {
+                                metrics.recordBusinessError();
+                            }
                         }
                     }
                     

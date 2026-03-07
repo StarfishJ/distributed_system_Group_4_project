@@ -85,8 +85,14 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         return Mono.empty();
                     }
                     return Mono.fromCallable(() -> {
+                        boolean allAccepted = true;
                         for (PublishTask task : publishTasks) {
-                            publisher.publishMessage(task.roomId, task.message);
+                            if (!publisher.publishMessage(task.roomId, task.message)) {
+                                allAccepted = false;
+                            }
+                        }
+                        if (!allAccepted) {
+                            return buildErrorJson("SERVER_BUSY");
                         }
                         return batchStr;
                     })
