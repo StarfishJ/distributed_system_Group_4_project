@@ -1,84 +1,67 @@
-# CS6650 Assignment 1 — Design Document: WebSocket Chat Server and Client 
-## 1. Architecture
+# CS6650 Assignment 2 — Design Document: Distributed WebSocket Chat System
+
+## 1. Architecture: The "Two-Hop" Distributed Broadcast
+To achieve horizontal scalability across multiple EC2 nodes while maintaining consistent message delivery, we implemented a decoupled architecture using a **Standalone Consumer** and a **Fan-out Broadcast** mechanism.
+
+### System Components
+-   **Client**: High-performance Java tool capable of simulating 500k-1M messages.
+-   **Server-v2 (N nodes)**: Spring Boot WebFlux nodes behind an **AWS Application Load Balancer (ALB)** with Session Stickiness.
+-   **RabbitMQ Broker**: Central hub containing a **Topic Exchange** (ingress) and a **Fan-out Exchange** (egress).
+-   **Standalone Consumer**: Dedicated logic layer for message processing, deduplication, and triggering global broadcasts.
+
+### Sequence Diagram
+```mermaid
+sequenceDiagram
+    participant C as Client (App)
+    participant S as Server-v2 (Node 1)
+    participant R as RabbitMQ (Topic)
+    participant CONS as Standalone Consumer
+    participant F as RabbitMQ (Fanout)
+    participant S2 as Server-v2 (Node 2)
+
+    C->>S: 1. Send WebSocket Message
+    S->>R: 2. Publish to Room Topic (room.{id})
+    S-->>C: 3. ACK (QUEUED)
+    R->>CONS: 4. Deliver to Room Queue
+    Note over CONS: 5. Deduplicate (Caffeine Cache)
+    CONS->>F: 6. Broadcast to Fan-out Exchange
+    F-->>S: 7. Deliver to Node 1 (Local Queue)
+    F-->>S2: 8. Deliver to Node 2 (Local Queue)
+    S->>C: 9. Echo to Original Sender
+    S2->>C: 10. Broadcast to other Users
 ```
-┌──────────────────────────────┐                    ┌──────────────────────────────┐
-│       CLIENT (Java)          │                    │       SERVER (Java)          │
-│  Multithreaded load-test     │                    │  Spring Boot WebFlux         │
-│  simulator                   │                    │  WebSocket + REST (EC2)      │
-└──────────────┬───────────────┘                    └──────────────┬───────────────┘
-               │                                                  │
-               │  WebSocket  ws://host:port/chat/{roomId}         │
-               │  ─────────────────────────────────────────────►  │  validate, echo
-               │  ◄─────────────────────────────────────────────  │  / error
-               │              JSON messages                       │
-               │                                                  │
-               │  REST  GET /health                               │
-               │  ─────────────────────────────────────────────►  │  {"status":"UP"}
-               │                                                  │
-┌──────────────┴───────────────┐                   ┌──────────────┴───────────────┐
-│ MessageGenerator → Queue     │                   │ ChatWebSocketHandler         │
-│ Workers → WS connections     │                   │ HealthController             │
-│ Metrics collection           │                   │ Room state management        │
-└──────────────────────────────┘                   └──────────────────────────────┘
-```
-**Client:** Producer-consumer model with `MessageGenerator` (1 thread) producing messages into per-worker `BlockingQueue`s, sharded by `(roomId, userId)` hash. Multiple `Worker` threads consume from queues, each maintaining one WebSocket connection with pipelining (up to `pipelineSize` in-flight messages) and batching.
 
-**Server:** Spring Boot WebFlux reactive server. `ChatWebSocketHandler` processes WebSocket messages, validates JOIN/TEXT/LEAVE logic, maintains room membership state, and echoes valid messages. `HealthController` serves REST `/health` endpoint.
-## 2. Major Classes and Relationships
-### Server
-| Class | Responsibility |
-|-------|----------------|
-| `ChatApplication` | Spring Boot entry point |
-| `WebSocketConfig` | Routes `/chat/{roomId}` to `ChatWebSocketHandler` |
-| `ChatWebSocketHandler` | Reactive WebSocket handler: parses JSON, validates JOIN/TEXT/LEAVE, maintains room state, echoes messages |
-| `NettyConfig` | Configures Netty worker threads (`-Dnetty.worker.threads=32`) |
-| `HealthController` | REST `/health` endpoint |
+---
 
-### Client
-| Class | Responsibility |
-|-------|----------------|
-| `ChatClientMain` | Entry point: creates queues, starts generator, spawns worker pool, collects metrics |
-| `MessageGenerator` | Generates messages with state-aware logic (JOIN before TEXT/LEAVE), shards by `(roomId, userId)` to per-worker queues |
-| `Worker` | Maintains WebSocket connection, implements pipelining/batching, handles reconnection with message re-queuing |
-| `Metrics` | Thread-safe aggregation: success/fail counts, latencies (P95/P99 in Part 2), per-room throughput |
-| `ClientConfig` | Loads `client.properties`: pipeline size, batch size, timeouts, worker counts |
+## 2. Detailed Message Workflow
 
-**Relationships:**
-ChatApplication → WebSocketConfig → ChatWebSocketHandler → Room state
-ChatClientMain → MessageGenerator → Per-worker Queue → Worker × N → WebSocket → Metrics
+1.  **Ingress**: The client establishes a persistent connection to a Server node via the ALB. ALB stickiness ensures the handshake and subsequent messages stay on the same node.
+2.  **First Hop (Topic)**: The Server receives a message, wraps it in a JSON envelope (with `timestamp` and `uuid`), and publishes it to `chat.exchange` using a routing key like `room.5`.
+3.  **Core Logic & Deduplication**: The **Standalone Consumer** handles the business logic. It uses a **Caffeine Cache** (10k entries, 5-minute TTL) to perform an atomic check on the `messageId`, ensuring no duplicate broadcasts occur even if RabbitMQ retries delivery.
+4.  **Second Hop (Fan-out)**: Valid messages are published to `broadcast.exchange`.
+5.  **Global Distribution**: RabbitMQ pushes the broadcast to **every** Server-v2 node. Each node creates a private, anonymous, auto-delete queue at startup precisely for this purpose.
+6.  **Local Delivery**: Each Server node's `BroadcastListener` receives the fan-out message and pushes it to all relevant local WebSocket sessions.
 
-## 3. Threading Model
-MessageGenerator (1 thread) → Per-worker BlockingQueue → Worker × N (each: 1 WS conn)
-- **Warmup:** 32-64 threads, each sends configurable messages, then exits
-- **Main:** 64-128 workers, each maintains one WebSocket, consumes from dedicated queue (sharded by `roomId+userId`)
-- **Generator:** Single thread, state-aware message generation, shards to queues
-- **Synchronization:** `BlockingQueue` for producer-consumer coordination; `AtomicInteger/Long`, `ConcurrentLinkedQueue` for thread-safe metrics
-- **Pipelining:** Up to `pipelineSize` (400-2000) in-flight messages per worker using `Semaphore`; batching (50-250 msgs/frame)
-## 4. WebSocket Connection Management
+---
 
-| Aspect | Strategy |
-|--------|----------|
-| **Creation** | One WebSocket per Worker to `ws://host:port/chat/{roomId}` (`roomId = workerId % 20 + 1`). Retry with exponential backoff (up to 10 attempts). |
-| **Reuse** | Same connection for all messages. Batching (multiple msgs/frame) and pipelining (up to `pipelineSize` in-flight). |
-| **Failure & Retry** | On drop/timeout: close socket, re-queue pending messages to front (preserving order), retry connection. After max failures, worker exits. |
-| **Cleanup** | Wait for in-flight messages to drain, then close connection. |
+## 3. Resilience & Scalability Strategies
 
-## 5. Little's Law Calculations
-**Little's Law:** L = λ × W, where L = concurrent connections, W = avg RTT, λ = throughput
+### Layered Defense
+-   **Circuit Breaker (Resilience4j)**: Servers protect their Netty thread pools by failing fast if RabbitMQ becomes unresponsive.
+-   **Consumer Scaling (Horizontal)**: To handle 500k+ messages without MQ memory overflow, multiple Consumer instances can be run in parallel (Competing Consumers pattern).
+-   **Backpressure**: RabbitMQ queues are configured with `x-max-length=1000` and `overflow=drop-head` as a final protection against broker crashes during extreme bursts.
 
-**Actual Test Results (EC2 deployment, Part 2):**
-- **Configuration:** 64 workers, pipelineSize=2000, batchSize=250
-- **Measured W (Mean RTT):** 101.19 ms = 0.10119 s
-- **Measured W (Median RTT):** 101.00 ms = 0.101 s (very close to mean, indicating stable performance)
-- **Actual Throughput λ:** 83,570 msg/s
-- **Total Runtime:** 5,983 ms for 500,000 messages
-- **P95 latency:** 121 ms, **P99 latency:** 127 ms
+### Threading Model
+-   **Server**: Non-blocking Netty Event Loop (~2-4x CPU cores).
+-   **Consumer**: High-concurrency listener pool (`concurrency=80-120`) to ensure 100ms end-to-end lag.
+-   **Client**: 64-512 worker threads using **Asynchronous Pipelining** to saturate the link.
 
-**Calculation using Mean RTT:**
-1. **L (Concurrent connections):** 64 workers
-2. **W (RTT):** 0.10119 s (mean latency)
-3. **Naive Prediction (without pipelining):    λ_pred_naive = L / W = 64 / 0.10119 = 632.5 msg/s
-4. **Actual vs Naive Prediction:**
-   - **Actual:** 83,570 msg/s
-   - **Naive prediction:** 632.5 msg/s
-   - **Ratio:** 132.1× higher than naive prediction
+---
+
+## 4. Little's Law & Performance
+**Theory:** L = λ × W (Concurrent Connections = Throughput × Latency)
+
+**Baseline (1 Node Performance):**
+-   **Throughput (λ)**: ~4,800 - 5,200 msg/s
+-   **Mean Latency (W)**: ~100ms (End-to-End Broadcast)
+-   **Scaling Result**: Horizontal scaling from 1 to 4 nodes shows a near-linear increase in aggregate throughput, provided the Consumer layer is also scaled to prevent MQ queue buildup.

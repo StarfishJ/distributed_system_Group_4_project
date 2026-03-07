@@ -27,6 +27,10 @@ public class Metrics {
     private final LongAdder connectionFailureCount = new LongAdder();
     private final LongAdder reconnectCount = new LongAdder();
     
+    private final LongAdder consumerLagTotalMs = new LongAdder();
+    private final LongAdder consumerLagCount = new LongAdder();
+    private final ConcurrentLinkedQueue<Long> consumerLagsMs = new ConcurrentLinkedQueue<>();
+    
     private final ConcurrentLinkedQueue<Long> latenciesMs = new ConcurrentLinkedQueue<>();
     
     // Note: Per-message metrics are now written directly to CSV file asynchronously
@@ -239,6 +243,18 @@ public class Metrics {
         connectionFailureCount.increment();
     }
 
+    public void recordConsumerLag(long lagMs) {
+        if (lagMs < 0) return; // Ignore negative lag due to minor clock sync if any
+        consumerLagTotalMs.add(lagMs);
+        consumerLagCount.increment();
+        
+        int count = SAMPLING_COUNTER.get() + 1;
+        SAMPLING_COUNTER.set(count);
+        if (count % 500 == 0) { // Slightly higher sampling for lag
+            consumerLagsMs.add(lagMs);
+        }
+    }
+
     public void recordLatencyMs(long latencyMs) {
         int count = SAMPLING_COUNTER.get() + 1;
         SAMPLING_COUNTER.set(count);
@@ -273,83 +289,42 @@ public class Metrics {
 
     public void printSummary() {
         long success = successCount.sum();
-        long fail = failCount.sum();
-        long bizErr = businessErrorCount.sum();
-        long total = success + fail;
-        long wallMs = getWallTimeMs();
+        long total = success + failCount.sum();
         double wallSec = getWallTimeSeconds();
-        double throughput = total > 0 && wallMs > 0 ? total * 1000.0 / wallMs : 0;
+        double throughput = total > 0 && wallSec > 0 ? total / wallSec : 0;
 
-        System.out.println("========== Part 2 Metrics (Performance Analysis) ==========");
-        System.out.println("Successful messages (responses): " + success);
-        System.out.println("Business errors (status=ERROR):  " + bizErr);
-        System.out.println("Failed messages (no response):   " + fail);
-        System.out.println("Total runtime (ms):  " + wallMs);
-        System.out.println("Throughput (msg/s):  " + String.format("%.2f", throughput));
-        System.out.println("Total connections:   " + connectionCount.sum());
-        System.out.println("Connection failures: " + connectionFailureCount.sum());
-        System.out.println("Reconnections:       " + reconnectCount.sum());
-        System.out.println();
-
-        // Response time statistics (successful messages only)
+        System.out.println("------------------------------------------------------------");
+        System.out.println("🚀 ASSIGNMENT 2 PERFORMANCE REPORT SUMMARY");
+        System.out.println("------------------------------------------------------------");
+        System.out.println(String.format("%-25s : %s", "Throughput", String.format("%.2f msg/s", throughput)));
+        System.out.println(String.format("%-25s : %d", "Total Messages (Success)", success));
+        System.out.println(String.format("%-25s : %.2f sec", "Total Runtime", wallSec));
+        
         List<Long> sorted = new ArrayList<>(latenciesMs);
         if (!sorted.isEmpty()) {
             Collections.sort(sorted);
-            int n = sorted.size();
-
-            double sum = 0;
-            for (long v : sorted) sum += v;
-            double mean = sum / n;
-            Long midLo = (n > 1) ? sorted.get(n / 2 - 1) : null;
-            Long midHi = sorted.get(n / 2);
-            double median = (n % 2 == 1)
-                    ? (midHi != null ? midHi : 0L)
-                    : ((midLo != null ? midLo : 0L) + (midHi != null ? midHi : 0L)) / 2.0;
-            long p95 = sorted.get((int) Math.min(n - 1, Math.round((n - 1) * 0.95)));
-            long p99 = sorted.get((int) Math.min(n - 1, Math.round((n - 1) * 0.99)));
-            long minLat = sorted.get(0);
-            long maxLat = sorted.get(n - 1);
-
-            System.out.println("--- Response Time (successful messages) ---");
-            System.out.println("Mean (ms):           " + String.format("%.2f", mean));
-            System.out.println("Median (ms):         " + String.format("%.2f", median));
-            System.out.println("95th percentile (ms): " + p95);
-            System.out.println("99th percentile (ms): " + p99);
-            System.out.println("Min (ms):            " + minLat);
-            System.out.println("Max (ms):            " + maxLat);
-            System.out.println();
+            long p95 = sorted.get((int) Math.min(sorted.size() - 1, Math.round((sorted.size() - 1) * 0.95)));
+            double mean = latenciesMs.stream().mapToLong(l -> l).average().orElse(0);
+            System.out.println(String.format("%-25s : %.2f ms", "Mean Latency (E2E ACK)", mean));
+            System.out.println(String.format("%-25s : %d ms", "P95 Latency", p95));
         }
 
-        // Throughput per room
-        if (wallSec > 0) {
-            System.out.println("--- Throughput per room (msg/s) ---");
-            for (int r = 1; r < successByRoom.length; r++) {
-                long count = successByRoom[r].sum();
-                if (count > 0) {
-                    double roomThroughput = count / wallSec;
-                    System.out.println("  Room " + String.format("%2d", r) + ": " + String.format("%.2f", roomThroughput) + " msg/s (" + count + " msgs)");
-                }
+        if (consumerLagCount.sum() > 0) {
+            double avgLag = consumerLagTotalMs.sum() / (double) consumerLagCount.sum();
+            System.out.println(String.format("%-25s : %.2f ms", "Avg Consumer Lag", avgLag));
+        }
+
+        System.out.println(String.format("%-25s : %d", "Connection Failures", connectionFailureCount.sum()));
+        System.out.println(String.format("%-25s : %.2f%%", "Success Rate", (total > 0 ? 100.0 * success / total : 0)));
+        System.out.println("------------------------------------------------------------");
+        
+        // Compact Room Stats: only print first and last to show uniformity without spamming
+        if (wallSec > 0 && successByRoom[1].sum() > 0) {
+            System.out.print("Room Uniformity Check: ");
+            for (int r : new int[]{1, 10, 20}) {
+                System.out.print(String.format("R%d=%.1f ", r, successByRoom[r].sum() / wallSec));
             }
-            System.out.println();
+            System.out.println("msg/s");
         }
-
-        // Message type distribution
-        if (!successByMessageType.isEmpty()) {
-            System.out.println("--- Message Type Distribution ---");
-            long totalTyped = 0;
-            for (LongAdder v : successByMessageType.values()) totalTyped += v.sum();
-            List<Map.Entry<String, LongAdder>> entries = new ArrayList<>(successByMessageType.entrySet());
-            entries.sort((a, b) -> Long.compare(b.getValue().sum(), a.getValue().sum()));
-            for (Map.Entry<String, LongAdder> e : entries) {
-                long c = e.getValue().sum();
-                double pct = totalTyped > 0 ? 100.0 * c / totalTyped : 0;
-                System.out.println("  " + e.getKey() + ": " + c + " (" + String.format("%.2f", pct) + "%)");
-            }
-        }
-
-        if (success == 0 && total == 0 && connectionCount.sum() > 0) {
-            System.out.println("(Hint: 0 sent with connections → check server is running and WebSocket /chat/{1..20} echoes JSON with status:\"OK\")");
-        }
-        System.out.println("============================================================");
     }
 }

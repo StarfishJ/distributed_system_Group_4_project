@@ -1,0 +1,22 @@
+﻿[INFO] Scanning for projects...
+[INFO] 
+[INFO] ----------------------< cs6650:chat-client-part2 >----------------------
+[INFO] Building chat-client-part2 0.0.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.2.0:clean (default-clean) @ chat-client-part2 ---
+[INFO] Deleting D:\6650\assignment 1\client\client_part2\target
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ chat-client-part2 ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.11.0:compile (default-compile) @ chat-client-part2 ---
+[INFO] Changes detected - recompiling the module! :source
+[INFO] Compiling 6 source files with javac [debug release 17] to target\classes
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  2.530 s
+[INFO] Finished at: 2026-03-06T13:56:54-08:00
+[INFO] ------------------------------------------------------------------------

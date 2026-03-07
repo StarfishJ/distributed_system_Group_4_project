@@ -112,6 +112,20 @@ public class Worker implements Runnable {
                     // FIX: Only poll and calculate latency if this is a status response from the server.
                     // Broadcast messages (which lack "status") should be ignored.
                     if (!isOk && !isError) {
+                        // This is a broadcast message. Extract timestamp to calculate Consumer Lag.
+                        // We use a simple string search to avoid full JSON parsing for every broadcast.
+                        int tsIndex = line.indexOf("\"timestamp\":");
+                        if (tsIndex != -1) {
+                            int start = tsIndex + 12;
+                            int end = line.indexOf(',', start);
+                            if (end == -1) end = line.indexOf('}', start);
+                            if (end != -1) {
+                                try {
+                                    long sentTime = Long.parseLong(line.substring(start, end).trim());
+                                    metrics.recordConsumerLag(System.currentTimeMillis() - sentTime);
+                                } catch (NumberFormatException ignored) {}
+                            }
+                        }
                         continue;
                     }
 

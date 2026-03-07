@@ -7,8 +7,6 @@ import com.sun.management.OperatingSystemMXBean;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import java.io.File;
-import java.net.NetworkInterface;
-import java.util.Collections;
 
 import reactor.core.publisher.Mono;
 
