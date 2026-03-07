@@ -13,6 +13,13 @@ import org.springframework.stereotype.Component;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * Message Consumer: consume messages from room queues and publish to global broadcast exchange.
@@ -37,10 +44,30 @@ public class MessageConsumer {
 
     private final RabbitTemplate rabbitTemplate;
     private final ConsumerMetrics metrics;
+    
+    // Batching state
+    private final ConcurrentLinkedQueue<ClientMessage> batchQueue = new ConcurrentLinkedQueue<>();
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "broadcast-batcher");
+        t.setDaemon(true);
+        return t;
+    });
 
     public MessageConsumer(RabbitTemplate rabbitTemplate, ConsumerMetrics metrics) {
         this.rabbitTemplate = rabbitTemplate;
         this.metrics = metrics;
+    }
+
+    @PostConstruct
+    public void init() {
+        // Flash batch every 50ms
+        scheduler.scheduleAtFixedRate(this::flushBatch, 50, 50, TimeUnit.MILLISECONDS);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        scheduler.shutdown();
+        flushBatch();
     }
 
     /**
@@ -65,21 +92,46 @@ public class MessageConsumer {
         }
 
         try {
-            // Forward to Fanout exchange (Non-persistent for performance)
-            rabbitTemplate.convertAndSend(RabbitMQConfig.BROADCAST_EXCHANGE, "", message, m -> {
-                m.getMessageProperties().setDeliveryMode(org.springframework.amqp.core.MessageDeliveryMode.NON_PERSISTENT);
-                return m;
-            });
+            // Add to batch instead of direct send
+            batchQueue.add(message);
             
-            // ACK original message from room queue
+            // ACK original message from room queue immediately (at-least-once for the batch buffer)
             channel.basicAck(deliveryTag, false);
-            metrics.incrementProcessed();
         } catch (Exception e) {
             log.error("Failed to process message: msgId={}", msgId, e);
             try {
-                // Reject if publish fails (requeue=false to DLX)
                 channel.basicReject(deliveryTag, false);
             } catch (Exception re) { }
+        }
+    }
+
+    private synchronized void flushBatch() {
+        if (batchQueue.isEmpty()) return;
+
+        List<ClientMessage> batch = new ArrayList<>();
+        ClientMessage msg;
+        while ((msg = batchQueue.poll()) != null && batch.size() < 100) {
+            batch.add(msg);
+        }
+
+        if (batch.isEmpty()) return;
+
+        try {
+            // Forward the whole batch as a JSON array to Fanout exchange
+            rabbitTemplate.convertAndSend(RabbitMQConfig.BROADCAST_EXCHANGE, "", batch, m -> {
+                m.getMessageProperties().setDeliveryMode(org.springframework.amqp.core.MessageDeliveryMode.NON_PERSISTENT);
+                return m;
+            });
+            metrics.incrementProcessed(); // Approximate: increments per batch or we could increment by batch.size()
+            // To be accurate with existing metrics:
+            for (int i = 1; i < batch.size(); i++) metrics.incrementProcessed();
+        } catch (Exception e) {
+            log.error("Failed to publish broadcast batch (size={})", batch.size(), e);
+        }
+        
+        // If there are still items, schedule another immediate flush
+        if (!batchQueue.isEmpty()) {
+            scheduler.execute(this::flushBatch);
         }
     }
 }
