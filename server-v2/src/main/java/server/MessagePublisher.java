@@ -35,6 +35,7 @@ public class MessagePublisher {
         this.rabbitTemplate = rabbitTemplate;
         this.circuitBreaker = registry.circuitBreaker(CIRCUIT_BREAKER_NAME);
         this.metrics = metrics;
+        log.info("Upstream Batching enabled: maxQueue={}, flushInterval={}ms", MAX_BATCH_SIZE, FLUSH_INTERVAL_MS);
 
         this.rabbitTemplate.setConfirmCallback((correlationData, ack, cause) -> {
             if (!ack) {
@@ -84,6 +85,7 @@ public class MessagePublisher {
             circuitBreaker.executeRunnable(() ->
                 rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, "room." + roomId, batch));
             metrics.incrementPublished();
+            if (log.isDebugEnabled()) log.debug("Flushed upstream batch: room={}, size={}", roomId, batch.size());
         } catch (CallNotPermittedException e) {
             log.warn("Circuit breaker OPEN - batch dropped: roomId={}", roomId);
             metrics.incrementPublishError();

@@ -60,6 +60,7 @@ public class MessageConsumer {
 
     @PostConstruct
     public void init() {
+        log.info("Bi-directional Batching enabled: downstream flush 50ms");
         // Flash batch every 50ms
         scheduler.scheduleAtFixedRate(this::flushBatch, 50, 50, TimeUnit.MILLISECONDS);
     }
@@ -82,6 +83,7 @@ public class MessageConsumer {
             if (payload instanceof List) {
                 @SuppressWarnings("unchecked")
                 List<ClientMessage> messages = (List<ClientMessage>) payload;
+                if (log.isDebugEnabled()) log.debug("Received upstream batch: size={}", messages.size());
                 for (ClientMessage msg : messages) {
                     processSingleMessage(msg);
                 }
@@ -128,6 +130,7 @@ public class MessageConsumer {
                 m.getMessageProperties().setDeliveryMode(org.springframework.amqp.core.MessageDeliveryMode.NON_PERSISTENT);
                 return m;
             });
+            if (log.isDebugEnabled()) log.debug("Flushed broadcast batch: size={}", batch.size());
             metrics.incrementProcessed(); // Approximate: increments per batch or we could increment by batch.size()
             // To be accurate with existing metrics:
             for (int i = 1; i < batch.size(); i++) metrics.incrementProcessed();
