@@ -14,14 +14,14 @@ public class MessagePublisher {
 
     private static final Logger log = LoggerFactory.getLogger(MessagePublisher.class);
     private static final String CIRCUIT_BREAKER_NAME = "rabbitmq";
-    private static final int MAX_BATCH_SIZE = 100;
+    private static final int MAX_BATCH_SIZE = 200;
     private static final long FLUSH_INTERVAL_MS = 30;
 
     private final RabbitTemplate rabbitTemplate;
     private final CircuitBreaker circuitBreaker;
     private final ServerMetrics metrics;
     private final java.util.concurrent.ScheduledExecutorService scheduler = 
-            java.util.concurrent.Executors.newScheduledThreadPool(2);
+            java.util.concurrent.Executors.newScheduledThreadPool(20);
     
     private final java.util.concurrent.ConcurrentHashMap<String, RoomBuffer> roomBuffers = 
             new java.util.concurrent.ConcurrentHashMap<>();
