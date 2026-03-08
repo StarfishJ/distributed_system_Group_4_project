@@ -10,7 +10,7 @@ This repository contains the enhanced implementation for Assignment 2, featuring
 |-- consumer/            # Standalone Consumer (RabbitMQ -> Broadcast Fanout)
 |-- client/
 |   |-- client_part2/    # Load testing client with latency/throughput analysis
-|-- monitoring/          # Python monitoring script (RabbitMQ + App Metrics)
+|-- monitoring/          # Monitoring documentation (RabbitMQ + Actuator)
 |-- deployment/          # systemd service files and ALB configuration notes
 |-- results/             # Test results and CSV exports
 ```
@@ -31,7 +31,7 @@ mvn clean package -DskipTests -f client/client_part2/pom.xml
 java -Dserver.id=Node-1 -jar server-v2/target/chat-server-0.0.1-SNAPSHOT.jar
 
 # EC2 (Connect to RabbitMQ instance)
-java -Dserver.id=EC2-Node-A -Dspring.rabbitmq.host=<RABBITMQ_IP> -jar chat-server.jar
+java -Dserver.id=EC2-Node-A -Dspring.rabbitmq.host=<RABBITMQ_IP> -jar server-v2/target/chat-server-0.0.1-SNAPSHOT.jar
 ```
 
 ### 3. Run Consumer
@@ -40,19 +40,16 @@ java -Dserver.id=EC2-Node-A -Dspring.rabbitmq.host=<RABBITMQ_IP> -jar chat-serve
 java -jar consumer/target/chat-consumer-0.0.1-SNAPSHOT.jar
 
 # EC2
-java -Dspring.rabbitmq.host=<RABBITMQ_IP> -jar chat-consumer.jar
+java -Dspring.rabbitmq.host=<RABBITMQ_IP> -jar consumer/target/chat-consumer-0.0.1-SNAPSHOT.jar
 ```
 
-### 4. Run Monitoring Script
-```bash
-# Monitor RabbitMQ and App nodes (Server/Consumer)
-python monitoring/monitor.py --rabbitmq-host <RMQ_IP> --server-hosts <SRV_IP1>,<SRV_IP2> --consumer-hosts <CON_IP>
-```
+### 4. System Monitoring
+Please refer to [monitoring/README.md](./monitoring/README.md) for details on using the RabbitMQ Management Dashboard and Spring Actuator metrics.
 
 ### 5. Run Load Test (to ALB)
 ```bash
 # Replace with your ALB DNS name
-java -jar client/client_part2/target/client_part2-1.0-SNAPSHOT.jar http://<ALB_DNS_NAME> 100000
+java -jar client/client_part2/target/chat-client-part2-0.0.1-SNAPSHOT.jar http://<ALB_DNS_NAME> 100000
 ```
 
 ## Verification & Health
@@ -73,48 +70,34 @@ ssh -i "your-key.pem" ec2-user@<INSTANCE_PUBLIC_IP>
 ```bash
 cd ~/Distributed-System-Assignment-1
 git pull
-sudo ./deployment/deploy-server.sh <RABBITMQ_PRIVATE_IP>
+# Build
+mvn clean package -DskipTests -f server-v2/pom.xml
+# Run (Replace <MQ_IP> with your RabbitMQ Private IP)
+nohup java -Xmx1g \
+  -Dserver.id=Node-1 \
+  -Dspring.rabbitmq.host=<MQ_IP> \
+  -jar server-v2/target/chat-server-0.0.1-SNAPSHOT.jar \
+  > ~/server.log 2>&1 &
 ```
-*Note: This script handles building, creating a systemd service, and starting the server.*
 
 ### 3. Update and Deploy Consumer (Run on Consumer Node)
 ```bash
 cd ~/Distributed-System-Assignment-1
 git pull
-./deployment/deploy-consumer.sh <RABBITMQ_PRIVATE_IP>
-```
-*Note: This script kills the old process and starts a new one with `nohup`.*
-
-### 4. Verify on EC2
-- Check logs: `tail -f /tmp/consumer.log` or `journalctl -u chat-server -f`
-- Check health: `curl http://localhost:8080/health`
-
----
-
-## 🛠 Manual Deployment Cheat Sheet (No Scripts)
-
-If you prefer manual commands due to changing IPs, use these (run after `mvn clean package`):
-
-### **Server-v2 (Run on 4 Nodes)**
-Copy-paste this (replace `<MQ_IP>`):
-```bash
-nohup java -Xmx1g \
-  -Dserver.id=Node-1 \
-  -Dspring.rabbitmq.host=<RABBITMQ_PRIVATE_IP_HERE> \
-  -jar server-v2/target/chat-server-0.0.1-SNAPSHOT.jar \
-  > ~/server.log 2>&1 &
-```
-*(Change `Node-1` to 2, 3, 4 for each instance)*
-
-### **Consumer (Run on 1 Node)**
-Copy-paste this (replace `<MQ_IP>`):
-```bash
+# Build
+mvn clean package -DskipTests -f consumer/pom.xml
+# Run (Replace <MQ_IP> with your RabbitMQ Private IP)
 nohup java -Xmx2g \
-  -Dconcurrency=120 -Dmax-concurrency=120 -Dprefetch=5 \
-  -Dspring.rabbitmq.host=<RABBITMQ_PRIVATE_IP_HERE> \
+  -Dspring.rabbitmq.listener.simple.concurrency=20 \
+  -Dspring.rabbitmq.listener.simple.prefetch=1 \
+  -Dspring.rabbitmq.host=<MQ_IP> \
   -jar consumer/target/chat-consumer-0.0.1-SNAPSHOT.jar \
   > /tmp/consumer.log 2>&1 &
 ```
+
+### 4. Verify on EC2
+- Check logs: `tail -f /tmp/consumer.log` or `tail -f ~/server.log`
+- Check health: `curl http://localhost:8080/health`
 
 ---
 
@@ -126,6 +109,6 @@ nohup java -Xmx2g \
 ---
 
 ## Submission Artifacts
-- **Architecture**: [system_design.md](file:///C:/Users/james/.gemini/antigravity/brain/f523feaa-6e29-49ea-90ce-d6608463293e/system_design.md)
-- **Deployment Guide**: [alb_testing_guide.md](file:///C:/Users/james/.gemini/antigravity/brain/f523feaa-6e29-49ea-90ce-d6608463293e/alb_testing_guide.md)
-- **Final Report**: [walkthrough.md](file:///C:/Users/james/.gemini/antigravity/brain/f523feaa-6e29-49ea-90ce-d6608463293e/walkthrough.md)
+- **Architecture**: [DesignDocument.md](./DesignDocument.md)
+- **Deployment Guide**: [deployment/alb-setup.md](./deployment/alb-setup.md)
+- **Monitoring**: [monitoring/README.md](./monitoring/README.md)

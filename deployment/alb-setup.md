@@ -19,8 +19,7 @@ Before setting up ALB, ensure your server-v2 instances are running and healthy.
 **Run on each server-v2 EC2 instance:**
 ```bash
 # start server-v2
-java -jar server-v2.jar --server.port=8080 \
-  --spring.rabbitmq.host=<RabbitMQ_EC2_私有IP>
+java -Xmx1g -Dspring.rabbitmq.host=<RabbitMQ_EC2_私有IP> -jar target/chat-server-0.0.1-SNAPSHOT.jar
 
 # verify health check endpoint is accessible
 curl http://localhost:8080/health
@@ -163,9 +162,7 @@ When you need horizontal scaling:
 
 Each new instance startup command is the same, replace RabbitMQ IP:
 ```bash
-java -jar server-v2.jar \
-  --server.port=8080 \
-  --spring.rabbitmq.host=<RabbitMQ_EC2_私有IP>
+java -Xmx1g -Dspring.rabbitmq.host=<RabbitMQ_EC2_私有IP> -jar target/chat-server-0.0.1-SNAPSHOT.jar
 ```
 
 ---
@@ -185,31 +182,8 @@ curl -b cookies.txt http://<ALB_DNS>/health
 
 ---
 
-## Step 10: Save Configuration Information (for submission)
-
-In `/deployment/` directory, record the following information:
-
-```
-deployment/
-├── alb-config.md         ← ALB parameters (this document summary)
-├── target-group.md       ← Target Group screenshots
-└── deploy.sh             ← server-v2 startup script
-```
-
-**`deployment/deploy.sh` example:**
-```bash
-#!/bin/bash
-RABBITMQ_HOST=${1:-"localhost"}
-JAR_PATH="server-v2.jar"
-
-java -Xmx512m -Xms256m \
-  -jar $JAR_PATH \
-  --server.port=8080 \
-  --spring.rabbitmq.host=$RABBITMQ_HOST \
-  --netty.worker.threads=32 &
-
-echo "server-v2 started with PID $!"
-```
+## Step 10: Configuration Summary
+The detailed configurations for the Application Load Balancer, Target Groups, and Session Stickiness are documented above. Ensure these match your AWS environment settings for successful deployment.
 
 ---
 

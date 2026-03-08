@@ -1,67 +1,125 @@
 # CS6650 Assignment 2 — Design Document: Distributed WebSocket Chat System
 
-## 1. Architecture: The "Two-Hop" Distributed Broadcast
-To achieve horizontal scalability across multiple EC2 nodes while maintaining consistent message delivery, we implemented a decoupled architecture using a **Standalone Consumer** and a **Fan-out Broadcast** mechanism.
+## Git Repository
+https://github.com/StarfishJ/Distributed-System-Assignment-1.git
 
-### System Components
--   **Client**: High-performance Java tool capable of simulating 500k-1M messages.
--   **Server-v2 (N nodes)**: Spring Boot WebFlux nodes behind an **AWS Application Load Balancer (ALB)** with Session Stickiness.
--   **RabbitMQ Broker**: Central hub containing a **Topic Exchange** (ingress) and a **Fan-out Exchange** (egress).
--   **Standalone Consumer**: Dedicated logic layer for message processing, deduplication, and triggering global broadcasts.
+## 1. System Architecture
+Our architecture utilizes a decoupled, event-driven pattern to achieve horizontal scalability. Servers handle WebSocket I/O via Netty, while a standalone Consumer layer manages global broadcast logic via RabbitMQ.
 
-### Sequence Diagram
+### [Diagram 1: System Overview]
 ```mermaid
-sequenceDiagram
-    participant C as Client (App)
-    participant S as Server-v2 (Node 1)
-    participant R as RabbitMQ (Topic)
-    participant CONS as Standalone Consumer
-    participant F as RabbitMQ (Fanout)
-    participant S2 as Server-v2 (Node 2)
-
-    C->>S: 1. Send WebSocket Message
-    S->>R: 2. Publish to Room Topic (room.{id})
-    S-->>C: 3. ACK (QUEUED)
-    R->>CONS: 4. Deliver to Room Queue
-    Note over CONS: 5. Deduplicate (Caffeine Cache)
-    CONS->>F: 6. Broadcast to Fan-out Exchange
-    F-->>S: 7. Deliver to Node 1 (Local Queue)
-    F-->>S2: 8. Deliver to Node 2 (Local Queue)
-    S->>C: 9. Echo to Original Sender
-    S2->>C: 10. Broadcast to other Users
+graph TD
+    Client["Java Client"] --> ALB["AWS Application Load Balancer"]
+    ALB --> S1["Server-v2 Node (+ optional duplicate nodes S2, S3...)"]
+    S1 --> RMQ_T[("RabbitMQ: Topic chat.exchange")]
+    RMQ_T --> CONS["Standalone Consumer"]
+    CONS --> RMQ_F[("RabbitMQ: Fan-out broadcast.exchange")]
+    RMQ_F --> |Push| S1
+    S1 --> |WebSocket| Client
 ```
 
 ---
 
-## 2. Detailed Message Workflow
+## 2. Message Flow Sequence
+Each message undergoes a "Two-Hop" delivery to ensure all users in a room receive it, regardless of which server they are connected to.
 
-1.  **Ingress**: The client establishes a persistent connection to a Server node via the ALB. ALB stickiness ensures the handshake and subsequent messages stay on the same node.
-2.  **First Hop (Topic)**: The Server receives a message, wraps it in a JSON envelope (with `timestamp` and `uuid`), and publishes it to `chat.exchange` using a routing key like `room.5`.
-3.  **Core Logic & Deduplication**: The **Standalone Consumer** handles the business logic. It uses a **Caffeine Cache** (10k entries, 5-minute TTL) to perform an atomic check on the `messageId`, ensuring no duplicate broadcasts occur even if RabbitMQ retries delivery.
-4.  **Second Hop (Fan-out)**: Valid messages are published to `broadcast.exchange`.
-5.  **Global Distribution**: RabbitMQ pushes the broadcast to **every** Server-v2 node. Each node creates a private, anonymous, auto-delete queue at startup precisely for this purpose.
-6.  **Local Delivery**: Each Server node's `BroadcastListener` receives the fan-out message and pushes it to all relevant local WebSocket sessions.
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server-v2
+    participant RMQ as RabbitMQ
+    participant CONS as Consumer
 
----
-
-## 3. Resilience & Scalability Strategies
-
-### Layered Defense
--   **Circuit Breaker (Resilience4j)**: Servers protect their Netty thread pools by failing fast if RabbitMQ becomes unresponsive.
--   **Consumer Scaling (Horizontal)**: To handle 500k+ messages without MQ memory overflow, multiple Consumer instances can be run in parallel (Competing Consumers pattern).
--   **Backpressure**: RabbitMQ queues are configured with `x-max-length=1000` and `overflow=drop-head` as a final protection against broker crashes during extreme bursts.
-
-### Threading Model
--   **Server**: Non-blocking Netty Event Loop (~2-4x CPU cores).
--   **Consumer**: High-concurrency listener pool (`concurrency=80-120`) to ensure 100ms end-to-end lag.
--   **Client**: 64-512 worker threads using **Asynchronous Pipelining** to saturate the link.
+    C->>S: "1. Send WebSocket Message"
+    S->>RMQ: "2. Publish to room.{id} (Topic)"
+    S-->>C: "3. ACK (QUEUED)"
+    RMQ->>CONS: "4. Deliver to Queue"
+    CONS->>RMQ: "5. Broadcast to Fan-out"
+    RMQ-->>S: "6. Push to local nodes"
+    S->>C: "7. Deliver to WebSocket Session"
+```
 
 ---
 
-## 4. Little's Law & Performance
-**Theory:** L = λ × W (Concurrent Connections = Throughput × Latency)
+## 3. Queue Topology & Consumer Threading
 
-**Baseline (1 Node Performance):**
--   **Throughput (λ)**: ~4,800 - 5,200 msg/s
--   **Mean Latency (W)**: ~100ms (End-to-End Broadcast)
--   **Scaling Result**: Horizontal scaling from 1 to 4 nodes shows a near-linear increase in aggregate throughput, provided the Consumer layer is also scaled to prevent MQ queue buildup.
+### Queue Design
+- **Topic Exchange (`chat.exchange`)**: Handles ingress messages. Routing key: `room.{roomId}`.
+- **20 Room Queues**: Each room (1-20) has a dedicated durable queue to prevent head-of-line blocking between rooms.
+- **Fan-out Exchange (`broadcast.exchange`)**: Distributes valid messages to all server nodes.
+
+### Consumer Threading Model
+- **Thread-to-Queue Affinity**: The Consumer uses a pool of 20 concurrent threads.
+- **Isolation**: Each thread is pinned to a specific room queue (`prefetch=1`). This guarantees **strict message ordering** within each room while allowing parallel processing across rooms.
+
+---
+
+## 4. Load Balancing & Failure Handling
+
+### Load Balancer Configuration
+- **AWS ALB**: Handles WebSocket protocol upgrade and terminates TLS (if applicable).
+- **Sticky Sessions**: Enabled via duration-based cookies to ensure a client stays on the same server node for the duration of the stateful WebSocket handshake.
+
+### Failure Handling & Resilience
+**Circuit Breaker & Backpressure**
+-implemented a robust fail-fast mechanism using **Resilience4j**. If RabbitMQ becomes unresponsive (e.g., during AWS EBS throttling), the **Circuit Breaker** trips to the `OPEN` state.
+- **Server Logic**: Instead of dropping messages or blocking, the server immediately responds with `{"status":"ERROR","message":"SERVER_BUSY"}`.
+- **Client Resilience**: The Java client detects this specific error and performs an `offerFirst()` re-queue, ensuring **at-least-once delivery** despite physical hardware limitations.
+
+- **Deduplication**: The Consumer uses a **Caffeine Cache** (LRU) to drop duplicate `UUIDs` that may arise during network retries or RabbitMQ redeliveries.
+- **Graceful Shutdown**: All nodes use Spring's graceful shutdown (30s timeout) to ensure in-flight AMQP ACKs are processed before the process exits.
+
+---
+
+### Performance Results
+#### Single Server Node Baseline
+- **Aggregate Throughput**: ~3,506 msg/s
+- **Peak Rate**: ~4,800 msg/s
+- **Success Rate**: **100.00%** (500,000 messages)
+- **Survival**: Successfully survived AWS EBS I/O credit exhaustion via Backpressure logic.
+![Single Server Node](./results/single%20server%20node.png)
+
+![RabbitMQ console](./results/RabbitMQ.png)
+
+![connections](./results/MQ%20connection.png)
+
+#### Two Server Nodes
+![Two Server Nodes](./results/2%20server%20nodes%20-%20result.png)
+![Load Balanceing](./results/2%20server%20nodes%20-%20LB.png)
+![Two Server Nodes - MQ](./results/2%20server%20nodes%20-%20MQ.png)
+The throughput increased from 3506 msg/s to 3587 msg/s, which is an improvement of about 2.3%. The latency decreased from 206.39 ms to 149.87 ms, which is an improvement of about 27.4%.
+
+
+#### Four Server Nodes
+![Four Server Nodes](./results/4%20server%20nodes-result.png)
+![Load Balanceing](./results/4%20server%20nodes%20-%20LB.png)
+![Four Server Nodes - MQ](./results/4%20server%20nodes%20-%20MQ.png)
+Performance improvement analysis:
+The throughput is 3585 msg/s, which is virtually identical to the 2-node setup (3587 msg/s). This confirms that the system's performance is currently capped by **RabbitMQ's Disk I/O (EBS credits)** on the single-node broker, rather than the number of server nodes. However, the 4-node configuration provides significantly higher CPU headroom and resilience.
+
+
+### Configuration Detail
+#### Queue configuration parameters
+- **Room Queues**: 20 durable queues (`room.1` - `room.20`)
+- **TTL (Time To Live)**: 5,000ms (Messages expire after 5 seconds to prevent memory overflow)
+- **Max Length**: 1,000 messages per queue (Drop-head overflow policy)
+- **Dead Letter Exchange**: `chat.dlx` for failed/expired messages.
+- **Persistence**: Messages are marked persistent for durability.
+
+#### Consumer configuration
+- **Concurrency**: 20 (Fixed 1 thread per Room queue to ensure strict ordering)
+- **Prefetch Count**: 1 (Ensures fair distribution and prevents message bunching)
+- **Acknowledge Mode**: Manual (ACK sent only after successful processing/broadcast)
+- **Idempotency**: Caffeine cache (10 min expiry) to deduplicate broadcast IDs.
+
+#### ALB settings
+- **Idle Timeout**: 4,000 seconds (To maintain long-lived WebSocket connections)
+- **Stickiness**: Enabled (Load balancer generated cookie, duration: 86,400s)
+- **Protocol**: HTTP (Port 80) mapped to backend 8080.
+- **Health Check**: `GET /health` (Interval: 30s, Timeout: 5s, Threshold: 2)
+
+#### Instance types used
+- **Server Nodes**: 1 x `t3.medium` + optional `t3.micro` nodes
+- **Consumer Node**: 1 x `t3.small`
+- **RabbitMQ Node**: 1 x `t3.medium`
+- **Client**: Running on local performance analysis node
