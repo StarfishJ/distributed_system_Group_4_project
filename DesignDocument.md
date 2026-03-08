@@ -99,9 +99,15 @@ Performance improvement analysis:
 The throughput is 3585 msg/s, which is virtually identical to the 2-node setup (3587 msg/s). This confirms that the system's performance is currently capped by **RabbitMQ's Disk I/O (EBS credits)** on the single-node broker, rather than the number of server nodes. However, the 4-node configuration provides significantly higher CPU headroom and resilience.
 
 
+#### 100-Room Scalability Validation
+- **Goal**: Verify if the system handles room-to-queue collisions correctly when logic rooms exceed physical queues.
+- **Test Case**: 500,000 messages distributed across 100 logical rooms (mapped to 20 physical queues) with 64 worker threads.
+- **Result**: **100.00% Success Rate**, Throughput ~3,220 msg/s.
+- **Conclusion**: Confirmed that the hashing strategy and `roomId` preservation in the payload ensure perfect delivery even under high contention and room collisions.
+
 ### Configuration Detail
 #### Queue configuration parameters
-- **Room Queues**: 20 durable queues (`room.1` - `room.20`)
+- **Room Queues**: 20 durable physical queues (`room.1` - `room.20`) used for sharding logic rooms via hashing (`roomId % 20`).
 - **TTL (Time To Live)**: 5,000ms (Messages expire after 5 seconds to prevent memory overflow)
 - **Max Length**: 1,000 messages per queue (Drop-head overflow policy)
 - **Dead Letter Exchange**: `chat.dlx` for failed/expired messages.
