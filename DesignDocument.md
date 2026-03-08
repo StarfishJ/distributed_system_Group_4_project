@@ -45,7 +45,8 @@ sequenceDiagram
 
 ### Queue Design
 - **Topic Exchange (`chat.exchange`)**: Handles ingress messages. Routing key: `room.{roomId}`.
-- **20 Room Queues**: Unlimited rooms are mapped to 20 durable queues using a **Hashing Strategy**. This prevents head-of-line blocking while ensuring strict message ordering per room.
+- **20 Room Queues**: Unlimited rooms are mapped to 20 durable queues using a **Hashing Strategy**. (`room.{id % 20}`).
+- **Room ID Preservation**: Crucially, the original [roomId](cci:1://file:///d:/6650/assignment%201/server-v2/src/main/java/server/ChatWebSocketHandler.java:41:4-47:5) is preserved within the message payload. When the Consumer broadcasts the message, server nodes use this payload [roomId](cci:1://file:///d:/6650/assignment%201/server-v2/src/main/java/server/ChatWebSocketHandler.java:41:4-47:5) to deliver messages to the correct WebSocket sessions, allowing any number of rooms to coexist without collision. 
 - **Fan-out Exchange (`broadcast.exchange`)**: Distributes valid messages to all server nodes.
 
 ### Consumer Threading Model
