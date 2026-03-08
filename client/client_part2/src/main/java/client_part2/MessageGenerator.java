@@ -22,7 +22,7 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public class MessageGenerator implements Runnable {
 
-    public static final int NUM_ROOMS = 20;
+    private static final int NUM_ROOMS = ClientConfig.getNumRooms();
 
     private final BlockingQueue<ClientMessage> singleQueue;
     private final List<BlockingQueue<ClientMessage>> workerQueues;
@@ -53,11 +53,25 @@ public class MessageGenerator implements Runnable {
     }
 
     private static List<List<BlockingQueue<ClientMessage>>> buildRoomIndex(List<BlockingQueue<ClientMessage>> allQueues) {
-        if (allQueues == null) return null;
+        if (allQueues == null || allQueues.isEmpty()) return null;
         List<List<BlockingQueue<ClientMessage>>> map = new ArrayList<>(NUM_ROOMS);
-        for (int i = 0; i < NUM_ROOMS; i++) map.add(new ArrayList<>());
-        for (int i = 0; i < allQueues.size(); i++) {
-            map.get(i % NUM_ROOMS).add(allQueues.get(i));
+        for (int i = 0; i < NUM_ROOMS; i++) {
+            List<BlockingQueue<ClientMessage>> roomQueues = new ArrayList<>();
+            // Map each room to at least one queue.
+            // If rooms > queues, multiple rooms share a queue.
+            // If queues > rooms, multiple queues per room (sharding).
+            if (allQueues.size() >= NUM_ROOMS) {
+                // Original logic: distribute all queues among rooms
+                for (int j = 0; j < allQueues.size(); j++) {
+                    if (j % NUM_ROOMS == i) {
+                        roomQueues.add(allQueues.get(j));
+                    }
+                }
+            } else {
+                // More rooms than queues: each room gets exactly one queue
+                roomQueues.add(allQueues.get(i % allQueues.size()));
+            }
+            map.add(roomQueues);
         }
         return map;
     }

@@ -50,7 +50,7 @@ public class Worker implements Runnable {
         this.queue = (BlockingDeque<ClientMessage>) queue;
         this.serverBaseUrl = toWsUrl(serverBaseUrl);
         this.metrics = metrics;
-        this.roomId = (workerId % MessageGenerator.NUM_ROOMS) + 1;
+        this.roomId = (workerId % ClientConfig.getNumRooms()) + 1;
         this.maxMessages = maxMessages <= 0 ? 0 : maxMessages;
     }
 

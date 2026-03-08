@@ -223,14 +223,13 @@ public class ChatClientMain {
             for (int i = 0; i < mainQueues.size(); i++) {
                 int size = mainQueues.get(i).size();
                 queueTotal += size;
-                if (size > 0) nonExhaustedRooms.add((i % MessageGenerator.NUM_ROOMS) + 1);
+                if (size > 0) nonExhaustedRooms.add((i % ClientConfig.getNumRooms()) + 1);
             }
             System.out.println("[Main] Generator joined. Queue total size: " + queueTotal + " (remaining in queues). Rooms still pending: " + nonExhaustedRooms);
             long deadline = System.currentTimeMillis() + 30_000;
             while (mainMetrics.getSuccessCount() + mainMetrics.getFailCount() < 100 && System.currentTimeMillis() < deadline) {
                 TimeUnit.MILLISECONDS.sleep(500);
             }
-            // 30s 无进展则主动结束并投毒，避免长时间“卡住”像无限循环
             long sentBeforePoison = waitUntilCompletedOrStuck(mainMetrics, finalTotalMessages, 600_000, 30_000);
             System.out.println("[Main] Putting poison (sent so far: " + sentBeforePoison + ")...");
             for (int i = 0; i < mainThreads(); i++) {

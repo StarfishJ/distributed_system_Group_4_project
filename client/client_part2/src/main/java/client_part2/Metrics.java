@@ -37,7 +37,7 @@ public class Metrics {
     // No need to store MessageMetric objects in memory, reducing GC pressure
     
     // Use arrays instead of Map for fixed-size room IDs (1-20) to avoid hash lookups
-    private final LongAdder[] successByRoom = new LongAdder[MessageGenerator.NUM_ROOMS + 1];
+    private final LongAdder[] successByRoom = new LongAdder[ClientConfig.getNumRooms() + 1];
     private final Map<String, LongAdder> successByMessageType = new ConcurrentHashMap<>();
 
     private volatile long startTimeMs;
