@@ -39,16 +39,12 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         this.metrics = metrics;
     }
 
-    /** Extract roomId from path /chat/1 -> "1". */
+    /** Extract roomId from path /chat/abc -> "abc". */
     private static String roomIdFromPath(String path) {
         String prefix = "/chat/";
         if (path == null || !path.startsWith(prefix)) return null;
         String idStr = path.substring(prefix.length()).split("/")[0].trim();
-        try {
-            int rid = Integer.parseInt(idStr);
-            if (rid >= 1 && rid <= 20) return idStr;
-        } catch (NumberFormatException ignored) { }
-        return null;
+        return idStr.isEmpty() ? null : idStr;
     }
 
     @Override

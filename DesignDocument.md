@@ -45,7 +45,7 @@ sequenceDiagram
 
 ### Queue Design
 - **Topic Exchange (`chat.exchange`)**: Handles ingress messages. Routing key: `room.{roomId}`.
-- **20 Room Queues**: Each room (1-20) has a dedicated durable queue to prevent head-of-line blocking between rooms.
+- **20 Room Queues**: Unlimited rooms are mapped to 20 durable queues using a **Hashing Strategy**. This prevents head-of-line blocking while ensuring strict message ordering per room.
 - **Fan-out Exchange (`broadcast.exchange`)**: Distributes valid messages to all server nodes.
 
 ### Consumer Threading Model

@@ -73,7 +73,7 @@ public class RabbitMQConfig {
             String queueName = "room." + i;
             Queue queue = QueueBuilder.durable(queueName)
                     .ttl(5_000)            // Messages expire after 5 seconds
-                    .maxLength(1_000)      // Max 1k messages per queue
+                    .maxLength(1_000L)      // Max 1k messages per queue
                     .overflow(QueueBuilder.Overflow.dropHead)
                     .build();
             Binding binding = BindingBuilder.bind(queue).to(chatExchange).with(queueName);

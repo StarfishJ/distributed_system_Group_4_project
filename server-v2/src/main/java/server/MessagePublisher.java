@@ -98,9 +98,14 @@ public class MessagePublisher {
         buffer.timerActive = false;
 
         try {
+            // Decouple Room ID from Queue ID using hashing
+            // This allows unlimited rooms while reusing the 20 MQs
+            int queueIndex = Math.abs(roomId.hashCode()) % 20 + 1;
+            String routingKey = "room." + queueIndex;
+            
             // We already checked permission in publishMessage, but we execute under CB for monitoring
             circuitBreaker.executeRunnable(() ->
-                rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, "room." + roomId, batch));
+                rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, routingKey, batch));
             metrics.incrementPublished();
             if (log.isDebugEnabled()) log.debug("Flushed upstream batch: room={}, size={}", roomId, batch.size());
         } catch (Exception e) {
