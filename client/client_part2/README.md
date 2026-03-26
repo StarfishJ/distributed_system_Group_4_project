@@ -44,6 +44,15 @@ mvn exec:java -Dexec.args="http://your-server:8080 1000000"
 mvn exec:java -Dexec.args="http://your-server:8080 --no-warmup"
 ```
 
+### Separate result folders (500k vs 1M — no overwrite)
+
+Writes `per_message_metrics.csv`, `throughput_over_time.csv`, and `metrics_last.json` under `results/<tag>/`:
+
+```bash
+java -jar target/chat-client-part2-0.0.1-SNAPSHOT.jar --results-tag baseline500k http://your-server:8080 500000
+java -jar target/chat-client-part2-0.0.1-SNAPSHOT.jar --results-tag stress1m http://your-server:8080 1000000
+```
+
 ### Run from JAR
 
 ```bash

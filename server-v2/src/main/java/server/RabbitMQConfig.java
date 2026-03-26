@@ -91,6 +91,7 @@ public class RabbitMQConfig {
                     .ttl(5_000)            // Messages expire after 5 seconds
                     .maxLength(1_000)      // Max 1k messages per queue
                     .overflow(QueueBuilder.Overflow.dropHead) // Drop oldest when full
+                    .deadLetterExchange(DLX_EXCHANGE)
                     .build();
             Binding binding = BindingBuilder.bind(queue).to(chatExchange).with(queueName);
             declarables.add(queue);

@@ -1,24 +1,56 @@
-# Test results and CSV files (too large for Git)
-results/
-*.csv
+# --- Secrets & local overrides (never commit) ---
+.env
+.env.*
+*.pem
+**/terraform.tfvars
+!terraform.tfvars.example
+**/terraform.tfvars.example
 
-# Maven build artifacts
+# --- Terraform (if run from repo root; deployment/terraform has its own .gitignore) ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# --- Maven / Java ---
 target/
+**/target/
+pom.xml.tag
+pom.xml.releaseBackup
+release.properties
+dependency-reduced-pom.xml
+.mvn/wrapper/maven-wrapper.jar
 *.class
+hs_err_pid*
+replay_pid*
+
+# Fat JARs / WARs (build with mvn package locally)
 *.jar
 *.war
 *.ear
 
-# IDE files
+# --- Large generated load-test outputs ---
+# Per-run CSV/JSON can be millions of lines — regenerate locally after clone.
+*.csv
+!load-tests/results/batch_optimization.csv
+**/metrics_last.json
+
+# --- IDE ---
 .idea/
 .vscode/
 *.iml
 *.ipr
 *.iws
 
-# OS files
+# --- OS ---
 .DS_Store
 Thumbs.db
 
-# Logs
+# --- Logs ---
 *.log
+
+# --- Python (optional scripts under results/) ---
+__pycache__/
+.venv/
+venv/

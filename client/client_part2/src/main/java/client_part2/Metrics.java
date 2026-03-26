@@ -1,8 +1,13 @@
 package client_part2;
 
+import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -30,8 +35,6 @@ public class Metrics {
     private final LongAdder consumerLagTotalMs = new LongAdder();
     private final LongAdder consumerLagCount = new LongAdder();
     private final ConcurrentLinkedQueue<Long> consumerLagsMs = new ConcurrentLinkedQueue<>();
-    
-    private final ConcurrentLinkedQueue<Long> latenciesMs = new ConcurrentLinkedQueue<>();
     
     // Note: Per-message metrics are now written directly to CSV file asynchronously
     // No need to store MessageMetric objects in memory, reducing GC pressure
@@ -74,13 +77,6 @@ public class Metrics {
     public void recordSuccessWithDetails(int roomId, String messageType, long latencyMs) {
         successCount.increment();
         
-        // Zero-contention sampling (1 in 1000) to minimize GC and queue contention
-        int count = SAMPLING_COUNTER.get() + 1;
-        SAMPLING_COUNTER.set(count);
-        if (count % 1000 == 0) {
-            latenciesMs.add(latencyMs);
-        }
-        
         if (roomId >= 1 && roomId < successByRoom.length) {
             successByRoom[roomId].increment();
         }
@@ -99,6 +95,26 @@ public class Metrics {
     private static final AtomicBoolean csvWriterInitialized = new AtomicBoolean(false);
     private static final ConcurrentLinkedQueue<String> csvWriteQueue = new ConcurrentLinkedQueue<>();
     private static final int CSV_BATCH_SIZE = 1000; // Batch size for flushing
+
+    /** Target path for {@link #initializeCsvWriter()}; default {@code results/per_message_metrics.csv}. */
+    private static volatile String perMessageCsvPath = "results/per_message_metrics.csv";
+
+    /**
+     * Set CSV path before the first {@link #initializeCsvWriter()}. Ignored after initialization.
+     * Parent directories are created on init.
+     */
+    public static void setPerMessageMetricsCsvPath(String path) {
+        if (csvWriterInitialized.get()) {
+            return;
+        }
+        if (path != null && !path.isBlank()) {
+            perMessageCsvPath = path.trim();
+        }
+    }
+
+    public static String getPerMessageMetricsCsvPath() {
+        return perMessageCsvPath;
+    }
     
     /**
      * Initialize asynchronous CSV writer (called once at start).
@@ -106,9 +122,12 @@ public class Metrics {
     public static void initializeCsvWriter() {
         if (csvWriterInitialized.compareAndSet(false, true)) {
             try {
-                java.io.File resultsDir = new java.io.File("results");
-                if (!resultsDir.exists()) resultsDir.mkdirs();
-                csvWriter = new BufferedWriter(new FileWriter("results/per_message_metrics.csv", false), 64 * 1024); // 64KB buffer
+                java.io.File outFile = new java.io.File(perMessageCsvPath);
+                java.io.File parent = outFile.getParentFile();
+                if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                    System.err.println("[Metrics] Could not create directory: " + parent);
+                }
+                csvWriter = new BufferedWriter(new FileWriter(outFile, false), 64 * 1024); // 64KB buffer
                 csvWriter.write("timestamp,messageType,latency,statusCode,roomId\n");
                 
                 // Start background thread for async writes
@@ -177,30 +196,86 @@ public class Metrics {
      * Blocks until all queued data is written to file.
      */
     public static void shutdownCsvWriter() {
-        if (csvWriterExecutor != null && csvWriter != null) {
-            try {
-                // Wait for queue to drain (with timeout)
-                int waitCount = 0;
-                while (!csvWriteQueue.isEmpty() && waitCount < 100) {
-                    Thread.sleep(100);
-                    waitCount++;
-                }
-                
-                // Shutdown executor (interrupts writer thread)
-                csvWriterExecutor.shutdown();
-                
-                // Wait a bit more for final flush
-                Thread.sleep(200);
-                
-                // Close writer
-                csvWriter.close();
-                System.out.println("[Metrics] CSV writer shutdown complete. Queue size: " + csvWriteQueue.size());
-            } catch (IOException | InterruptedException e) {
-                System.err.println("[Metrics] Error shutting down CSV writer: " + e.getMessage());
+        if (csvWriterExecutor == null || csvWriter == null) {
+            return;
+        }
+        try {
+            int waitCount = 0;
+            while (!csvWriteQueue.isEmpty() && waitCount < 600) {
+                Thread.sleep(100);
+                waitCount++;
             }
+            csvWriterExecutor.shutdown();
+            if (!csvWriterExecutor.awaitTermination(120, TimeUnit.SECONDS)) {
+                csvWriterExecutor.shutdownNow();
+                csvWriterExecutor.awaitTermination(30, TimeUnit.SECONDS);
+            }
+            csvWriter.close();
+            csvWriter = null;
+            System.out.println("[Metrics] CSV writer shutdown complete. Queue size: " + csvWriteQueue.size());
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("[Metrics] Error shutting down CSV writer: " + e.getMessage());
         }
     }
-    
+
+    private static int percentileIndex(int n, double p) {
+        if (n <= 0) return 0;
+        return (int) Math.min(n - 1, Math.round((n - 1) * p));
+    }
+
+    /** OK-row latencies from {@code per_message_metrics.csv} (E2E ms); empty if missing/invalid. */
+    private static List<Long> readOkLatenciesFromPerMessageCsv(String csvPath) {
+        List<Long> okLatencies = new ArrayList<>(512_000);
+        if (csvPath == null || csvPath.isBlank()) {
+            return okLatencies;
+        }
+        Path path = Path.of(csvPath);
+        if (!Files.isRegularFile(path)) {
+            return okLatencies;
+        }
+        try (BufferedReader br = new BufferedReader(new FileReader(csvPath))) {
+            String line = br.readLine();
+            if (line == null || !line.contains("latency")) {
+                return okLatencies;
+            }
+            while ((line = br.readLine()) != null) {
+                if (line.isEmpty()) {
+                    continue;
+                }
+                int c0 = line.indexOf(',');
+                if (c0 < 0) {
+                    continue;
+                }
+                int c1 = line.indexOf(',', c0 + 1);
+                if (c1 < 0) {
+                    continue;
+                }
+                int c2 = line.indexOf(',', c1 + 1);
+                if (c2 < 0) {
+                    continue;
+                }
+                int c3 = line.indexOf(',', c2 + 1);
+                if (c3 < 0) {
+                    continue;
+                }
+                String status = line.substring(c2 + 1, c3).trim();
+                if (!"OK".equalsIgnoreCase(status)) {
+                    continue;
+                }
+                String latStr = line.substring(c1 + 1, c2).trim();
+                try {
+                    okLatencies.add(Long.parseLong(latStr));
+                } catch (NumberFormatException ignored) {
+                    // skip malformed
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("[Metrics] Failed to read latency CSV: " + e.getMessage());
+        }
+        return okLatencies;
+    }
+
     /**
      * Record detailed per-message metrics for CSV export (asynchronous write).
      * Writes to file in background thread without blocking main execution.
@@ -256,11 +331,7 @@ public class Metrics {
     }
 
     public void recordLatencyMs(long latencyMs) {
-        int count = SAMPLING_COUNTER.get() + 1;
-        SAMPLING_COUNTER.set(count);
-        if (count % 1000 == 0) {
-            latenciesMs.add(latencyMs);
-        }
+        // no-op: percentiles come from CSV in printSummary(perMessageCsvPath) after shutdownCsvWriter()
     }
 
     public long getSuccessCount() { return successCount.sum(); }
@@ -288,6 +359,14 @@ public class Metrics {
     }
 
     public void printSummary() {
+        printSummary(null);
+    }
+
+    /**
+     * Prints throughput summary and, after {@link #shutdownCsvWriter()}, E2E latencies from
+     * {@code per_message_metrics.csv} (status=OK rows): mean, p50, p95, p99.
+     */
+    public void printSummary(String perMessageCsvPath) {
         long success = successCount.sum();
         long total = success + failCount.sum();
         double wallSec = getWallTimeSeconds();
@@ -299,14 +378,21 @@ public class Metrics {
         System.out.println(String.format("%-25s : %s", "Throughput", String.format("%.2f msg/s", throughput)));
         System.out.println(String.format("%-25s : %d", "Total Messages (Success)", success));
         System.out.println(String.format("%-25s : %.2f sec", "Total Runtime", wallSec));
-        
-        List<Long> sorted = new ArrayList<>(latenciesMs);
-        if (!sorted.isEmpty()) {
-            Collections.sort(sorted);
-            long p95 = sorted.get((int) Math.min(sorted.size() - 1, Math.round((sorted.size() - 1) * 0.95)));
-            double mean = latenciesMs.stream().mapToLong(l -> l).average().orElse(0);
-            System.out.println(String.format("%-25s : %.2f ms", "Mean Latency (E2E ACK)", mean));
+
+        List<Long> okLatencies = readOkLatenciesFromPerMessageCsv(perMessageCsvPath);
+        if (!okLatencies.isEmpty()) {
+            Collections.sort(okLatencies);
+            int n = okLatencies.size();
+            long p50 = okLatencies.get(percentileIndex(n, 0.50));
+            long p95 = okLatencies.get(percentileIndex(n, 0.95));
+            long p99 = okLatencies.get(percentileIndex(n, 0.99));
+            double mean = okLatencies.stream().mapToLong(Long::longValue).average().orElse(0);
+            System.out.println(String.format("%-25s : %.2f ms (n=%d OK rows)", "Mean Latency (E2E ACK)", mean, n));
+            System.out.println(String.format("%-25s : %d ms", "P50 Latency", p50));
             System.out.println(String.format("%-25s : %d ms", "P95 Latency", p95));
+            System.out.println(String.format("%-25s : %d ms", "P99 Latency", p99));
+        } else if (perMessageCsvPath != null && !perMessageCsvPath.isBlank()) {
+            System.out.println(String.format("%-25s : %s", "E2E latency (CSV)", "no OK rows or file missing — " + perMessageCsvPath));
         }
 
         if (consumerLagCount.sum() > 0) {

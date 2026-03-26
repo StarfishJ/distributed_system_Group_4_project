@@ -1,0 +1,41 @@
+# CS6650 Assignment 3: PostgreSQL + RabbitMQ for local development
+# Run: docker compose up -d
+# Stop: docker compose down
+# Fresh MQ (wipe broker data): docker compose down && docker compose up -d --force-recreate rabbitmq
+#   or remove old container/volume if you used a named volume elsewhere.
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: chat-mq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: chatdb-pg
+    environment:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chat
+      POSTGRES_DB: chatdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - chatdb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chat -d chatdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  chatdb_data:

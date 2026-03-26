@@ -26,7 +26,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *
  * - Retry on timeout: if oldest in-flight exceeds ECHO_TIMEOUT_MS, close, fail all in-flight, reconnect.
  * - Track failed messages via Metrics.recordFail().
- * - On success, record latency via Metrics.recordLatencyMs() for P95/P99.
+ * - On success, latency is in CSV via recordMessageMetric; percentiles printed after run.
  * 
  * FIX: WebSocketClient instances cannot be reused after close - must create new instance for reconnection.
  */

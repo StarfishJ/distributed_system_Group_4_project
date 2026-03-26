@@ -33,6 +33,15 @@ public class ChatWebSocketHandler implements WebSocketHandler {
     private final ServerMetrics metrics;
     private static final JsonFactory JSON_FACTORY = new JsonFactory();
 
+    /** Aligned with client_part2 MessageGenerator (userId 1–100_000, rooms 1–20). */
+    private static final int USER_ID_MIN = 1;
+    private static final int USER_ID_MAX = 100_000;
+    private static final int USERNAME_MIN_LEN = 3;
+    private static final int USERNAME_MAX_LEN = 64;
+    private static final int MESSAGE_MAX_LEN = 2_000;
+    private static final int ROOM_ID_MIN = 1;
+    private static final int ROOM_ID_MAX = 20;
+
     public ChatWebSocketHandler(MessagePublisher publisher, RoomManager roomManager, ServerMetrics metrics) {
         this.publisher = publisher;
         this.roomManager = roomManager;
@@ -160,28 +169,31 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         }
 
         if (userId == null || userId.isEmpty()) return new ProcessResult(buildErrorJson("userId missing"), null);
-        if (username == null || username.length() < 3) return new ProcessResult(buildErrorJson("username invalid"), null);
+        if (username == null || username.isEmpty()) return new ProcessResult(buildErrorJson("username missing"), null);
         if (msgContent == null || msgContent.isEmpty()) return new ProcessResult(buildErrorJson("message missing"), null);
         if (timestamp == null || !isValidTimestampFast(timestamp)) return new ProcessResult(buildErrorJson("invalid timestamp"), null);
         if (messageType == null) return new ProcessResult(buildErrorJson("messageType missing"), null);
 
-        if ("JOIN".equals(messageType)) {
-            if (roomId != null) {
-                roomManager.joinRoom(roomId, session, userId);
-            }
-        } else {
-            // Check if user is in room (broad check since we don't track all user metadata here)
-            // In a real system, we might query a global state, but here we check local RoomManager
-            if (roomId == null) {
-                return new ProcessResult(buildErrorJson("user not in room"), null);
-            }
-            if ("LEAVE".equals(messageType)) {
-                roomManager.leaveRoom(roomId, session, userId);
-            }
+        if (roomId == null || !isValidPathRoomId(roomId)) {
+            return new ProcessResult(buildErrorJson("invalid room"), null);
+        }
+        if (!isValidUserId(userId)) {
+            return new ProcessResult(buildErrorJson("userId out of range or invalid"), null);
+        }
+        if (!isValidUsername(username)) {
+            return new ProcessResult(buildErrorJson("username must be 3-64 alphanumeric characters"), null);
+        }
+        if (msgContent.length() > MESSAGE_MAX_LEN) {
+            return new ProcessResult(buildErrorJson("message exceeds max length"), null);
+        }
+        if (!isAllowedMessageType(messageType)) {
+            return new ProcessResult(buildErrorJson("messageType not allowed"), null);
         }
 
-        if (roomId == null) {
-            return new ProcessResult(buildErrorJson("invalid path"), null);
+        if ("JOIN".equals(messageType)) {
+            roomManager.joinRoom(roomId, session, userId);
+        } else if ("LEAVE".equals(messageType)) {
+            roomManager.leaveRoom(roomId, session, userId);
         }
 
         // Build the message for async publish (no I/O here)
@@ -236,5 +248,51 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         if (ts == null || ts.length() < 19) return false;
         return ts.charAt(4) == '-' && ts.charAt(7) == '-' && ts.charAt(10) == 'T'
                 && ts.charAt(13) == ':' && ts.charAt(16) == ':';
+    }
+
+    private static boolean isValidPathRoomId(String roomId) {
+        try {
+            int r = Integer.parseInt(roomId.trim());
+            return r >= ROOM_ID_MIN && r <= ROOM_ID_MAX;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /** Decimal user id in [USER_ID_MIN, USER_ID_MAX], no leading +/- or spaces. */
+    private static boolean isValidUserId(String userId) {
+        if (userId.length() > 12) {
+            return false;
+        }
+        for (int i = 0; i < userId.length(); i++) {
+            if (!Character.isDigit(userId.charAt(i))) {
+                return false;
+            }
+        }
+        try {
+            int v = Integer.parseInt(userId);
+            return v >= USER_ID_MIN && v <= USER_ID_MAX;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /** Letters and digits only (ASCII), length bounds. Matches e.g. user12345 from load client. */
+    private static boolean isValidUsername(String username) {
+        int n = username.length();
+        if (n < USERNAME_MIN_LEN || n > USERNAME_MAX_LEN) {
+            return false;
+        }
+        for (int i = 0; i < n; i++) {
+            char c = username.charAt(i);
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isAllowedMessageType(String messageType) {
+        return "JOIN".equals(messageType) || "TEXT".equals(messageType) || "LEAVE".equals(messageType);
     }
 }

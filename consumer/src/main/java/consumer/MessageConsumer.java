@@ -1,9 +1,20 @@
 package consumer;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.AmqpHeaders;
@@ -13,40 +24,37 @@ import org.springframework.stereotype.Component;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
+
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * Message Consumer: consume messages from room queues and publish to global broadcast exchange.
- * 
- * Compliance:
- * - Multi-threaded: Concurrency 20 (1 thread per room)
- * - Specific Rooms: Uses @RabbitListener(queues = "#{roomQueueNames}") for dynamic sharding
- * - Fair Distribution: Each queue gets dedicated processing
- * - Ordering: Prefetch=1 ensures per-room order
- * - Idempotency: Caffeine cache for deduplication
+ *
+ * - Per-room batching: preserves ordering within each room
+ * - At-least-once: basicNack requeue=true with retry limit before DLQ
  */
 @Component
 public class MessageConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(MessageConsumer.class);
+    private static final ObjectMapper objectMapper = new ObjectMapper();
 
-    // High-performance thread-safe cache for message deduplication
     private final Cache<String, Boolean> processedIds = Caffeine.newBuilder()
             .maximumSize(10000)
             .expireAfterWrite(10, TimeUnit.MINUTES)
             .build();
 
+    private final Cache<String, Integer> nackRetryCount = Caffeine.newBuilder()
+            .maximumSize(5000)
+            .expireAfterWrite(5, TimeUnit.MINUTES)
+            .build();
+
     private final RabbitTemplate rabbitTemplate;
     private final ConsumerMetrics metrics;
-    
-    // Batching state
-    private final ConcurrentLinkedQueue<ClientMessage> batchQueue = new ConcurrentLinkedQueue<>();
+
+    private final Map<String, ConcurrentLinkedQueue<ClientMessage>> broadcastBuffers = new ConcurrentHashMap<>();
+    private static final int NACK_MAX_RETRIES = 3;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "broadcast-batcher");
         t.setDaemon(true);
@@ -71,76 +79,87 @@ public class MessageConsumer {
         flushBatch();
     }
 
-    /**
-     * Listen on rooms defined in RabbitMQConfig.roomQueueNames bean.
-     * This allows running multiple Consumer instances each handling a subset of rooms.
-     * Accepts both individual ClientMessage and List<ClientMessage> (Upstream Batching).
-     */
     @RabbitListener(queues = "#{roomQueueNames}", ackMode = "MANUAL")
-    public void consumeRoomQueue(Object payload, Channel channel,
+    public void consumeRoomQueue(Message amqpMessage, Channel channel,
                                  @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag) {
+        byte[] body = amqpMessage.getBody();
+        if (body == null || body.length == 0) {
+            try { channel.basicAck(deliveryTag, false); } catch (Exception e) { }
+            return;
+        }
         try {
-            if (payload instanceof List) {
-                @SuppressWarnings("unchecked")
-                List<ClientMessage> messages = (List<ClientMessage>) payload;
-                if (log.isDebugEnabled()) log.debug("Received upstream batch: size={}", messages.size());
-                for (ClientMessage msg : messages) {
-                    processSingleMessage(msg);
-                }
-            } else if (payload instanceof ClientMessage) {
-                processSingleMessage((ClientMessage) payload);
+            List<ClientMessage> messages = parsePayload(body);
+            for (ClientMessage msg : messages) {
+                processSingleMessage(msg);
             }
-
-            // ACK original message or batch from room queue
             channel.basicAck(deliveryTag, false);
+            nackRetryCount.asMap().remove(bodyHash(body));
         } catch (Exception e) {
             log.error("Failed to process message/batch: error={}", e.getMessage());
+            handleConsumeFailure(channel, deliveryTag, body);
+        }
+    }
+
+    private void handleConsumeFailure(Channel channel, long deliveryTag, byte[] body) {
+        String key = bodyHash(body);
+        int retries = nackRetryCount.asMap().getOrDefault(key, 0);
+        if (retries < NACK_MAX_RETRIES) {
+            nackRetryCount.asMap().put(key, retries + 1);
+            try {
+                channel.basicNack(deliveryTag, false, true);
+            } catch (Exception ex) { }
+        } else {
+            nackRetryCount.asMap().remove(key);
             try {
                 channel.basicReject(deliveryTag, false);
-            } catch (Exception re) { }
+                log.warn("Max consume retries exceeded, rejecting to DLQ");
+            } catch (Exception ex) { }
+        }
+    }
+
+    private static String bodyHash(byte[] body) {
+        return String.valueOf(java.util.Arrays.hashCode(body));
+    }
+
+    private static List<ClientMessage> parsePayload(byte[] body) {
+        try {
+            if (body[0] == '[') {
+                return objectMapper.readValue(body, new TypeReference<List<ClientMessage>>() {});
+            }
+            return List.of(objectMapper.readValue(body, ClientMessage.class));
+        } catch (Exception e) {
+            log.warn("Failed to parse payload: {}", e.getMessage());
+            return List.of();
         }
     }
 
     private void processSingleMessage(ClientMessage message) {
         String msgId = message.messageId();
-        
-        // Idempotency: Atomic Duplicate detection via Caffeine Cache
         if (msgId != null && processedIds.asMap().putIfAbsent(msgId, Boolean.TRUE) != null) {
             return;
         }
-
-        // Add to batch instead of direct send
-        batchQueue.add(message);
+        String roomId = message.roomId() != null ? message.roomId() : "0";
+        broadcastBuffers.computeIfAbsent(roomId, k -> new ConcurrentLinkedQueue<>()).add(message);
     }
 
     private synchronized void flushBatch() {
-        if (batchQueue.isEmpty()) return;
-
-        List<ClientMessage> batch = new ArrayList<>();
-        ClientMessage msg;
-        while ((msg = batchQueue.poll()) != null && batch.size() < 100) {
-            batch.add(msg);
-        }
-
-        if (batch.isEmpty()) return;
-
-        try {
-            // Forward the whole batch as a JSON array to Fanout exchange
-            rabbitTemplate.convertAndSend(RabbitMQConfig.BROADCAST_EXCHANGE, "", batch, m -> {
-                m.getMessageProperties().setDeliveryMode(org.springframework.amqp.core.MessageDeliveryMode.NON_PERSISTENT);
-                return m;
-            });
-            if (log.isDebugEnabled()) log.debug("Flushed broadcast batch: size={}", batch.size());
-            metrics.incrementProcessed(); // Approximate: increments per batch or we could increment by batch.size()
-            // To be accurate with existing metrics:
-            for (int i = 1; i < batch.size(); i++) metrics.incrementProcessed();
-        } catch (Exception e) {
-            log.error("Failed to publish broadcast batch (size={})", batch.size(), e);
-        }
-        
-        // If there are still items, schedule another immediate flush
-        if (!batchQueue.isEmpty()) {
-            scheduler.execute(this::flushBatch);
+        for (Map.Entry<String, ConcurrentLinkedQueue<ClientMessage>> entry : broadcastBuffers.entrySet()) {
+            List<ClientMessage> batch = new ArrayList<>();
+            ClientMessage msg;
+            while ((msg = entry.getValue().poll()) != null && batch.size() < 100) {
+                batch.add(msg);
+            }
+            if (batch.isEmpty()) continue;
+            try {
+                rabbitTemplate.convertAndSend(RabbitMQConfig.BROADCAST_EXCHANGE, "", batch, m -> {
+                    m.getMessageProperties().setDeliveryMode(org.springframework.amqp.core.MessageDeliveryMode.NON_PERSISTENT);
+                    return m;
+                });
+                for (int i = 0; i < batch.size(); i++) metrics.incrementProcessed();
+            } catch (Exception e) {
+                log.error("Broadcast flush failed: room={}, size={}", entry.getKey(), batch.size(), e);
+                batch.forEach(entry.getValue()::add);
+            }
         }
     }
 }

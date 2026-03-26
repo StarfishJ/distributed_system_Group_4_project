@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * Single dedicated thread that generates all messages and places them in a thread-safe
@@ -29,6 +30,11 @@ public class MessageGenerator implements Runnable {
     private final List<List<BlockingQueue<ClientMessage>>> queuesByRoomIndex; // derived from workerQueues
     private final int totalMessages;
     private int[] messagesPerWorker = null; // when non-null, put exactly messagesPerWorker[i] into workerQueues[i]
+
+    /** When &gt; 0, main phase runs for this wall-clock duration instead of {@link #totalMessages}. */
+    private final long enduranceDurationMs;
+    /** Optional global cap on generator enqueue rate (messages/s) for endurance / throttled runs. */
+    private final Double throttleGlobalMsgPerSec;
 
     /** Per-room collection of joined userIds; O(1) add/remove/random-pick for TEXT/LEAVE. */
     private final List<RandomSet> joinedUsersByRoom;
@@ -118,6 +124,8 @@ public class MessageGenerator implements Runnable {
         this.queuesByRoomIndex = null;
         this.totalMessages = totalMessages;
         this.joinedUsersByRoom = createJoinedState();
+        this.enduranceDurationMs = 0;
+        this.throttleGlobalMsgPerSec = null;
     }
 
     /** Per-worker queues (sharded): messages distributed by user hash to preserve order per-user per-room. */
@@ -127,6 +135,24 @@ public class MessageGenerator implements Runnable {
         this.queuesByRoomIndex = buildRoomIndex(workerQueues);
         this.totalMessages = totalMessages;
         this.joinedUsersByRoom = createJoinedState();
+        this.enduranceDurationMs = 0;
+        this.throttleGlobalMsgPerSec = null;
+    }
+
+    /**
+     * Endurance: enqueue for {@code enduranceDurationMs} wall clock; optional {@code throttleGlobalMsgPerSec}
+     * limits approximate global enqueue rate.
+     */
+    public MessageGenerator(List<BlockingQueue<ClientMessage>> workerQueues, long enduranceDurationMs,
+            Double throttleGlobalMsgPerSec) {
+        this.singleQueue = null;
+        this.workerQueues = workerQueues;
+        this.queuesByRoomIndex = buildRoomIndex(workerQueues);
+        this.totalMessages = 0;
+        this.messagesPerWorker = null;
+        this.joinedUsersByRoom = createJoinedState();
+        this.enduranceDurationMs = enduranceDurationMs;
+        this.throttleGlobalMsgPerSec = throttleGlobalMsgPerSec;
     }
 
     /** Warmup: Fill each worker queue with exact count. messagesPerWorker[i] -> workerQueues[i]. */
@@ -139,13 +165,19 @@ public class MessageGenerator implements Runnable {
         this.totalMessages = sum;
         this.messagesPerWorker = messagesPerWorker;
         this.joinedUsersByRoom = createJoinedState();
+        this.enduranceDurationMs = 0;
+        this.throttleGlobalMsgPerSec = null;
     }
 
     @Override
     public void run() {
         try {
             if (workerQueues != null) {
-                System.out.println("[Generator] Started, will put " + totalMessages + " messages into " + workerQueues.size() + " worker queues.");
+                if (enduranceDurationMs > 0) {
+                    System.out.println("[Generator] Started endurance into " + workerQueues.size() + " worker queues.");
+                } else {
+                    System.out.println("[Generator] Started, will put " + totalMessages + " messages into " + workerQueues.size() + " worker queues.");
+                }
             }
             if (messagesPerWorker != null) {
                 // Warmup: generate messages and shard by (roomId, userId) to ensure order
@@ -160,6 +192,25 @@ public class MessageGenerator implements Runnable {
                     int shard = Math.abs(msg.getUserId().hashCode()) % roomQueues.size();
                     roomQueues.get(shard).put(msg);
                 }
+            } else if (enduranceDurationMs > 0) {
+                long deadline = System.currentTimeMillis() + enduranceDurationMs;
+                long produced = 0;
+                Double tps = throttleGlobalMsgPerSec;
+                long throttleNanos = (tps != null && tps > 0) ? Math.max(1L, Math.round(1_000_000_000.0 / tps)) : 0L;
+                System.out.println("[Generator] Endurance mode: run until wall clock reaches " + enduranceDurationMs
+                        + " ms" + (throttleNanos > 0 ? (" (~" + String.format("%.1f", 1_000_000_000.0 / throttleNanos) + " msg/s throttle)") : " (no throttle)"));
+                while (System.currentTimeMillis() < deadline) {
+                    ClientMessage msg = generateMessage();
+                    int roomIndex = Integer.parseInt(msg.getRoomId()) - 1;
+                    List<BlockingQueue<ClientMessage>> candidates = queuesByRoomIndex.get(roomIndex);
+                    int shard = Math.abs(msg.getUserId().hashCode()) % candidates.size();
+                    candidates.get(shard).put(msg);
+                    produced++;
+                    if (throttleNanos > 0) {
+                        LockSupport.parkNanos(throttleNanos);
+                    }
+                }
+                System.out.println("[Generator] Endurance finished: enqueued " + produced + " messages.");
             } else {
                 // Random load generation for Main
                 for (int i = 0; i < totalMessages; i++) {
@@ -175,7 +226,7 @@ public class MessageGenerator implements Runnable {
                     }
                 }
             }
-            if (workerQueues != null) {
+            if (workerQueues != null && enduranceDurationMs <= 0) {
                 System.out.println("[Generator] Done, put " + totalMessages + " messages into " + workerQueues.size() + " worker queues.");
             }
         } catch (InterruptedException e) {
