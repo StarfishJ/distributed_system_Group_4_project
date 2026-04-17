@@ -1,24 +1,50 @@
-# CS6650 Assignment 3 — Final Report
+# CS6650 Assignment 4 — Final Report
  
 **Repository:** https://github.com/StarfishJ/distributed_system_Group_4_project
 
 ---
 
-## 1. Architecture Selection Rationale
+## 1. Architecture Selection (Assignment 4 Task 1)
 
-We use a **decoupled, event-driven** topology so the WebSocket edge can scale independently from persistence and broadcast fan-out.
+### 1.1 Assignment 3 implementations reviewed
 
-**Why this shape fits the workload**
+Four Assignment 3 submissions from group members were evaluated against Assignment 4's stated selection criteria — **performance, scalability, maintainability**. Rows are ordered with the selected baseline (M1) first.
+
+| # | Member | Stack | Deploy | Peak Throughput | p99 | Endurance |
+|---|--------|-------|--------|-----------------|-----|-----------|
+| M1 | Yuchen Huang *(this repo)* | Postgres + Rabbit + Redis + PgBouncer | Docker / EKS | 399 msg/s (local 1M) | 294 ms | 26 min @ 382 msg/s, DLQ=0 |
+| M2 | Shiqi Yang | MySQL 8 + Rabbit | 2× t3.small EC2 | 4,129 msg/s (1M stress) | **38 ms** | — |
+| M3 | Huanhuan Yan | Postgres, ALB → EC2 | AWS | **5,730 msg/s (500k)** | n/a | — |
+| M4 | Yifan Tian | Postgres + `rewriteBatchedInserts`, MV refresh | AWS ALB | 3,822 msg/s sustained | 274 ms | **43 min / 9.88M msgs, 100%** |
+
+All four share the same **event-driven architecture family**: WebSocket edge → RabbitMQ topic exchange → consumer → durable store. Differences are DB choice, deployment target, batch configuration, and which optional subsystems each member shipped.
+
+### 1.2 Selection criteria
+
+- **Performance** — M2 leads on tail latency (**p99 = 38 ms** on MySQL); M4 leads on sustained endurance (**9.88M msgs over 43 min, 100% success**); M3 leads on burst throughput (**5,730 msg/s**) but degrades **−35%** to 3,697 msg/s under 1M stress.
+- **Scalability** — **M1 leads**: full `k8s/` manifests (Deployment / HPA-ready / Ingress / ConfigMap / Secret) and `deployment/terraform/` (VPC, EKS, ALB, RDS, managed services). M3/M4 use static EC2 pairs with no container orchestration; M2 is 2-instance AWS only.
+- **Maintainability** — **M1 leads**: already implements **6 of Assignment 4's 10 optimization categories** (indexing, connection pooling via HikariCP, materialized views, application caching via Caffeine + Redis, cache invalidation via scheduled MV refresh, read/write split via PgBouncer `6432`/`6433`). Each sits behind a runtime flag, enabling clean Config-A-vs-B measurement without code churn.
+
+### 1.3 Decision: select M1 as the Assignment 4 baseline
+
+Assignment 4 measures **optimization deltas**, not absolute throughput. Because all four Assignment 3 instances share the same architecture shape, the real question is which instance lets us isolate *added* optimizations most cleanly:
+
+1. **M1 ships the optimization scaffolding Assignment 4 asks for.** Every optimization toggle already exists behind a configuration flag (`server.redis.enabled`, `consumer.redis.enabled`, `server.metrics.read-replica.enabled`, `server.metrics.cache-ttl-seconds`). Remaining work is to **measure**, not **build**.
+2. **M4's methodology is portable; its code is not needed.** We adopt M4's test harness (batch-size × flush-interval matrix, `pg_stat_statements` snapshot, RabbitMQ queue-depth capture, 43-min endurance pattern) and apply it on M1's stack — getting M4-quality evidence on M1-quality code.
+3. **M3 shows stress-time regression** (−35% at 1M), which would confound optimization measurements — we could not distinguish infrastructure regression from optimization gain.
+4. **M2 (MySQL) would discard M1's Postgres-specific assets** (materialized views, BRIN index on `message_ts`, PgBouncer read/write split) for a p99 improvement on a metric Assignment 4 does not prioritize.
+
+### 1.4 Why M1's shape fits the Assignment 4 workload
 
 1. **Stateless edge (`server-v2`).** Netty/WebFlux handles concurrent WebSocket sessions. The server **does not** insert chat rows; it validates, batches, and **publishes to RabbitMQ** with **publisher confirms** before replying **`QUEUED`** to clients. This keeps ingress fast and failure modes explicit (**`SERVER_BUSY`** when the broker rejects load).
-
 2. **Single writer to PostgreSQL (`consumer-v3`).** All **`INSERT INTO messages … ON CONFLICT DO NOTHING`** run in the consumer after ordered consumption from **20 room queues** (`room.1`–`room.20`). Sharding uses **`Math.abs(roomId.hashCode()) % 20 + 1`** while preserving the real **`roomId`** in the payload for delivery and analytics. One writer path avoids split-brain persistence and simplifies idempotency.
-
 3. **RabbitMQ as the backplane.** Ingress uses a **topic exchange**; broadcast uses **fan-out** (`chat.broadcast`) by default, with an optional **topic exchange** (`chat.broadcast.topic`) for **targeted** delivery when Redis presence is available. This separates **ingress backpressure** (queue depth, publish confirms) from **broadcast amplification** (copies per server).
-
 4. **Observability and contention control.** **`GET /health`** supports ALB probes; **`GET /metrics`** is analytics-heavy and is isolated from the hot path using **caching (Caffeine + optional Redis)**, **materialized views**, and an optional **read JDBC URL** (locally: PgBouncer read pool; in AWS: RDS read replica). **REFRESH MATERIALIZED VIEW** always runs on the **primary** datasource, never on a read-only replica connection.
 
-**Tradeoff summary:** We accept **operational complexity** (broker + DB + optional Redis) in exchange for **horizontal scaling**, **clear failure semantics**, and **measurable** load-test behavior under JMeter.
+### 1.5 Accepted trade-offs
+
+- **Lower starting throughput on local Docker than M3/M4 on AWS.** Mitigation: the Assignment 4 JMeter sweep can also run on EKS (`k8s/` manifests) with t3.medium-class nodes comparable to M4's; expected ceiling ≈ M4's 3,800 msg/s.
+- **Highest operational surface** (Postgres + Rabbit + Redis + PgBouncer). Accepted in exchange for the six pre-built optimizations above and the ability to toggle each one independently for clean measurement.
 
 ---
 
