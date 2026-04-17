@@ -38,7 +38,7 @@ resource "aws_lb_target_group" "servers" {
 }
 
 resource "aws_lb_listener" "http" {
-  count             = var.enable_alb ? 1 : 0
+  count             = local.create_app_ec2 && var.enable_alb ? 1 : 0
   load_balancer_arn = aws_lb.main[0].arn
   port              = 80
   protocol          = "HTTP"

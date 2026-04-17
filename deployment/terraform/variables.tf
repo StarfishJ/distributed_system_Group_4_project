@@ -24,8 +24,14 @@ variable "key_name" {
 
 variable "allowed_ssh_cidr" {
   type        = string
-  description = "CIDR allowed to SSH (e.g. your home IP/32)"
+  description = "CIDR allowed to SSH to data-plane EC2 (use your public IP/32). Avoid 0.0.0.0/0."
   default     = "0.0.0.0/0"
+}
+
+variable "permit_unsafe_wide_ssh" {
+  type        = bool
+  description = "Set true only for disposable labs if you must use allowed_ssh_cidr = 0.0.0.0/0"
+  default     = false
 }
 
 variable "enable_eks" {
@@ -73,6 +79,25 @@ variable "instance_type_rabbitmq" {
   default = "t3.small"
 }
 
+# RabbitMQ EC2 broker: gp3 avoids gp2 burst-balance / IOPS credit ceilings under durable queue load.
+variable "rabbitmq_root_volume_size" {
+  type        = number
+  description = "Root EBS size (GiB) for the RabbitMQ EC2 instance"
+  default     = 40
+}
+
+variable "rabbitmq_root_volume_iops" {
+  type        = number
+  description = "gp3 provisioned IOPS (3000 is a common baseline; raise if broker disk is hot)"
+  default     = 3000
+}
+
+variable "rabbitmq_root_volume_throughput" {
+  type        = number
+  description = "gp3 throughput (MiB/s); 125 is default included tier"
+  default     = 125
+}
+
 variable "instance_type_db" {
   type    = string
   default = "t3.small"
@@ -106,6 +131,28 @@ variable "use_rds_postgres" {
   type        = bool
   description = "Use RDS PostgreSQL instead of EC2 postgres instance"
   default     = false
+}
+
+variable "create_ec2_rabbitmq" {
+  type        = bool
+  default     = null
+  description = <<-EOT
+    Create a dedicated RabbitMQ EC2 instance (you still install/configure RabbitMQ on it, or use user_data later).
+    If null: false when enable_eks=true (use in-cluster broker from k8s/ or set use_amazon_mq=true);
+    true when enable_eks=false and use_amazon_mq=false.
+    Set true explicitly for a hybrid (EKS apps + external EC2 broker).
+  EOT
+}
+
+variable "create_ec2_postgres" {
+  type        = bool
+  default     = null
+  description = <<-EOT
+    Create a dedicated PostgreSQL EC2 instance.
+    If null: false when enable_eks=true (use in-cluster Postgres from k8s/postgres.yaml or set use_rds_postgres=true);
+    true when enable_eks=false and use_rds_postgres=false.
+    Set true explicitly for a hybrid (EKS apps + external EC2 Postgres).
+  EOT
 }
 
 variable "amazon_mq_instance_type" {

@@ -466,8 +466,56 @@ Earlier experiments measured **end-to-end chat message rate** with multiple **`s
 
 - **`server-v2`:** EKS **Deployment** / **StatefulSet**; **`t3.medium`**-class nodes; ALB + AWS Load Balancer Controller.
 - **`consumer-v3`:** EKS **Deployment**; **`t3.small`**-class nodes (or shared pool); scale **`consumer.rooms`** across Deployments as needed.
-- **RabbitMQ:** **EC2** `t3.medium` with **gp3** EBS (per **§ Performance** broker notes).
+- **RabbitMQ:** **EC2** `t3.medium` (or `t3.small` for lab) with **gp3** root volume via Terraform **`root_block_device`** (per **§ Performance** broker notes).
 - **PostgreSQL:** **EC2** or **RDS** `t3.medium` + **PgBouncer**.
 - **Redis:** **ElastiCache** `cache.t3.micro` (or self-hosted in `k8s/redis.yaml` for non-prod).
 
 **Local (`database/docker-compose.yml`):** containerized Postgres, RabbitMQ, Redis, PgBouncer; **`server-v2` :8080**, **`consumer-v3` :8081**. **Load generation:** **`client_part2`** and/or **JMeter** on the host.
+
+---
+
+## AWS deployment target (all application and data tiers; load generation excluded)
+
+**Intended layout:** everything except the **load client** (`client_part2`, JMeter on a laptop/CI) runs in **AWS**.
+
+| Tier | AWS target | Notes |
+|------|------------|--------|
+| **server-v2 / consumer-v3** | **EKS** (`k8s/` + ECR images) | Ingress / ALB for HTTP + WebSocket |
+| **PostgreSQL** | **RDS** (primary + optional **read replica** for `server.metrics.read-replica.jdbc-url`) or **RDS + PgBouncer** | Ingest / MV **REFRESH** on primary; **`/metrics` SELECTs** on replica JDBC when enabled |
+| **RabbitMQ** | **EC2** with **gp3** root volume (Terraform `rabbitmq_root_volume_*`) **or** **Amazon MQ** | See **RabbitMQ on AWS** below |
+| **Redis** | **ElastiCache** (same VPC as EKS nodes) | Open **6379** from the EKS **node** security group |
+| **Load / grading client** | **Off-cluster** | Document public Ingress URL in the PDF |
+
+Terraform: **`deployment/terraform/`** — use **`use_rds_postgres`** / **`use_amazon_mq`** for managed DB/MQ. **In-cluster** Postgres/Rabbit in `k8s/` is for lab savings; for a single coherent AWS story, move to **RDS + Amazon MQ + ElastiCache** and update **ConfigMap/Secret** (avoid running two copies of the data plane).
+
+### RabbitMQ on AWS: gp3 vs cluster / mirroring
+
+1. **gp3 EBS (single broker EC2)** — **Best first step** when the broker sits on one VM: removes **gp2 I/O credit** bottlenecks seen in multi-server experiments (**§ Performance**). **Implementation:** attach **gp3** root/data volume with enough baseline IOPS/throughput. **Complexity:** low. **Tradeoff:** still **single-AZ / single-node** unless you add HA.
+
+2. **Cluster / quorum / mirrored queues** — **HA, higher ops cost:** classic mirroring is legacy; modern Rabbit favors **quorum queues** for fault tolerance across nodes. **Impact:** survive broker loss; scale out past one disk. **Complexity:** high (cluster size, network partitions, queue types). **Amazon MQ** may offer multi-AZ patterns for Rabbit — validate against current AWS docs before promising in the PDF.
+
+**Suggested narrative:** *Phase 1 — gp3 on the broker volume; Phase 2 — Amazon MQ multi-AZ or a self-managed quorum cluster if HA is required.*
+
+### Finer-grained materialized view refresh strategy
+
+**Current behavior:** **`MaterializedViewRefreshScheduler`** runs one **global** cron; **`getAllMetrics(..., refreshMaterializedViews=true)`** refreshes **all** analytics MVs and clears metric caches — expensive if used often.
+
+**Future refinements:**
+
+| Idea | Expected impact | Complexity |
+|------|-----------------|------------|
+| **Per-MV or tiered cron** | Hot MVs refresh often; cold MVs rarely | Medium |
+| **Staggered crons** | Spread I/O spikes | Low |
+| **Refresh only after ingest volume / time threshold** | Skip work when chat is quiet | Medium |
+| **Replica and MVs** | PostgreSQL **cannot** run **`REFRESH MATERIALIZED VIEW`** on a read-only hot standby like a writable primary; typical pattern is **refresh on primary**, replicate, **read MVs on replica** — verify version/docs before design | High |
+
+**Near-term safe bet:** stagger schedules + separate **light** vs **heavy** refresh in code; keep **`refreshMaterializedViews=true`** off the hot **`/metrics`** path in production.
+
+### Operational hardening (implemented in repo)
+
+| Risk | Mitigation |
+|------|------------|
+| **Public `GET /metrics?refreshMaterializedViews=true`** hammering the primary | **`server.metrics.allow-http-mv-refresh`** (default **true** locally; **`false`** in `k8s/server.yaml`) — returns **403** when disabled; scheduled MV refresh unchanged. |
+| **SSH open to the world** on data-plane EC2 | Terraform **`check`** — **`0.0.0.0/0`** blocked unless **`permit_unsafe_wide_ssh=true`**. |
+| **Dual data plane** (Terraform EC2 MQ/PG + in-cluster) | EKS default **skips** standalone MQ/PG EC2; see **`k8s/README.md`**. |
+| **REFRESH on read replica** | **`MetricsService.refreshMaterializedViewsInternal()`** uses **`jdbcWrite`** (primary) only; **`jdbcRead`** is SELECT-only — already safe for RDS replica URLs on the read bean. |

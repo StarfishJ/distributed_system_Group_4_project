@@ -15,8 +15,8 @@ spec:
     spec:
       containers:
       - name: consumer-v3
-        image: chat-consumer:latest # 本机编译后的镜像名
-        imagePullPolicy: Never
+        image: cs6650-consumer-v3:latest
+        imagePullPolicy: Always
         env:
         - name: SPRING_RABBITMQ_HOST
           valueFrom: { configMapKeyRef: { name: chat-config, key: MQ_HOST } }
@@ -40,7 +40,7 @@ spec:
           value: "true"
         livenessProbe:
           httpGet:
-            path: /health # 注意：consumer 这里的路径映射可能也需要检查，通常 Spring Boot 是 /actuator/health
+            path: /health
             port: 8081
           initialDelaySeconds: 30
         readinessProbe:

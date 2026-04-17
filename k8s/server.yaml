@@ -15,8 +15,8 @@ spec:
     spec:
       containers:
       - name: server-v2
-        image: chat-server:latest # 本机编译后的镜像名
-        imagePullPolicy: Never # 强制使用本地镜像 (用于学习/调试)
+        image: cs6650-server-v2:latest
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
@@ -48,6 +48,9 @@ spec:
           value: "true"
         # Single Postgres in this manifest — disable read-replica JDBC
         - name: SERVER_METRICS_READ_REPLICA_ENABLED
+          value: "false"
+        # Block GET /metrics?refreshMaterializedViews=true (heavy REFRESH on primary); rely on scheduled job instead
+        - name: SERVER_METRICS_ALLOW_HTTP_MV_REFRESH
           value: "false"
         # 存活探针：如果持续失败，K8s 会重启 Pod
         livenessProbe:

@@ -1,12 +1,15 @@
 # -----------------------------------------------------------------------------
-# Amazon EKS: server-v2 + consumer-v3 as Kubernetes workloads (DesignDocument)
-# Data plane (RabbitMQ, PostgreSQL, optional ElastiCache) stays outside the cluster.
+# Amazon EKS: server-v2 + consumer-v3 as Kubernetes workloads (DesignDocument).
+# Data plane: either in-cluster (k8s/postgres.yaml, rabbitmq.yaml, redis.yaml) or
+# external EC2 / Amazon MQ / RDS — see create_ec2_* variables and locals.tf.
 # -----------------------------------------------------------------------------
 
+# Pinned to v18.x: terraform-aws-modules/eks v19+ calls aws_iam_session_context,
+# which needs iam:GetRole on the lab role — AWS Academy/Vocareum often denies that.
 module "eks" {
   count   = var.enable_eks ? 1 : 0
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 20.17"
+  version = "18.31.0"
 
   cluster_name    = "${var.project_name}-eks"
   cluster_version = var.eks_cluster_version
@@ -41,11 +44,11 @@ module "eks" {
 
 # Allow EKS worker nodes to reach RabbitMQ / PostgreSQL on instances using aws_security_group.internal
 resource "aws_security_group_rule" "internal_from_eks_nodes" {
-  for_each = var.enable_eks ? toset([5672, 15672, 5432]) : toset([])
+  for_each = var.enable_eks ? toset(["5672", "15672", "5432"]) : toset([])
 
   type      = "ingress"
-  from_port = each.value
-  to_port   = each.value
+  from_port = tonumber(each.value)
+  to_port   = tonumber(each.value)
   protocol  = "tcp"
 
   security_group_id        = aws_security_group.internal.id

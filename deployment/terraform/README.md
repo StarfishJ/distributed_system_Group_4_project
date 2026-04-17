@@ -1,5 +1,11 @@
 # Terraform: CS6650 Chat on AWS
 
+**AWS Academy / Vocareum（`voclabs` 无 `iam:CreateRole`）无法自建 EKS，请用 EC2 路径：** **`enable_eks = false`**，步骤与 Docker 起 MQ/DB 见 **`README-EC2-LAB.md`**。
+
+**有完整 IAM 的账户（默认）：** **`enable_eks = true`**，数据面只用 **`k8s/` 里的 Postgres + RabbitMQ + Redis**，**不要**打开 **`create_ec2_rabbitmq` / `create_ec2_postgres` / `use_amazon_mq` / `use_rds_postgres`**。Terraform 只负责 **VPC + EKS**；应用见 **`k8s/README.md`**（ECR、`kubectl apply -k`）。
+
+---
+
 ## 空白 AWS 账户能一键建好什么？
 
 **可以。** 本目录的 Terraform 会创建（无需你先在控制台点安全组 / VPC）：
@@ -9,22 +15,20 @@
 | **VPC** | 10.0.0.0/16，DNS 已开 |
 | **Internet Gateway + 公有路由** | 实例可出网 |
 | **2 个公有子网** | 跨 2 个 AZ（ALB / EKS 可用） |
-| **Amazon EKS**（默认 **`enable_eks = true`**） | 托管控制面 + **managed node group**（默认 `t3.medium`）；**server-v2 / consumer-v3** 用仓库 `k8s/*.yaml` 部署；安全组已放行节点访问 **RabbitMQ / PostgreSQL**（EC2 或 Amazon MQ / RDS） |
+| **Amazon EKS**（默认 **`enable_eks = true`**） | 托管控制面 + **managed node group**；**server-v2 / consumer-v3** 用仓库 **`k8s/`** 部署。数据面推荐 **集群内** Postgres/Rabbit/Redis（与 `k8s/kustomization.yaml` 一致），此时 **默认不再创建** 独立的 RabbitMQ/Postgres **EC2**（省重复费用）。安全组仍允许节点访问 **5672/15672/5432**（供 Amazon MQ / RDS 或自建 EC2 数据面使用） |
 | **安全组 `alb`** | 仅 **`enable_eks = false`** 时：入站 80；与 **EC2 + ALB** 路径一起用 |
 | **安全组 `internal`** | 入站 22；8080 **来自 ALB**（EC2 模式）；**来自 EKS 节点** 的 5672/15672/5432（数据面在集群外时）；实例间 **互通** |
 | **EC2 Key Pair** | 若设置 `public_key_path`，由 Terraform **上传你的公钥** |
-| **EC2 数据面**（可选） | **`enable_eks = false`** 时：RabbitMQ、Postgres、Consumer 各 1；Server-v2 共 `server_count` 台 + **ALB** |
+| **EC2 数据面**（可选） | **`enable_eks = false`** 时：默认仍创建 RabbitMQ、Postgres **EC2**（除非 `use_amazon_mq` / `use_rds_postgres`）+ Consumer 1 + Server `server_count` + **ALB**。**`enable_eks = true`** 时：默认 **不** 创建这两台 MQ/DB EC2；需要外置 broker/DB 时设 **`create_ec2_rabbitmq = true`** / **`create_ec2_postgres = true`** 或改用托管服务 |
 | **ALB + Target Group** | 仅 **EC2 应用模式**（`enable_eks = false` 且 `enable_alb = true`） |
 | **User-data** | 数据面 EC2：Java 17 + git |
 
-**托管服务（在 `terraform.tfvars` 里设 `use_amazon_mq` / `use_rds_postgres` 为 `true`；变量默认 `false`，即默认仍为 EC2 跑 MQ/DB）：**
+**托管服务（`use_amazon_mq` / `use_rds_postgres`）：**
 
-- **Amazon MQ**：托管 RabbitMQ（`mq.t3.micro`），用户名见变量 `amazon_mq_username`，密码见 `terraform output -raw rabbitmq_password`。
-- **RDS PostgreSQL**：`db.t3.micro`，库名默认 `chatdb`，用户默认 `chat`，密码见 `terraform output -raw postgres_password`。
+- **Amazon MQ** / **RDS**：与 EC2 自建二选一；密码见 `terraform output`。
+- **`enable_eks = true` 且未开托管、且未设 `create_ec2_*`**：`terraform output` 里 **`rabbitmq_mode` / `postgres_mode` 为 `kubernetes`**，`rabbitmq_host` / `postgres_jdbc_url` 为 **null** 属正常 — 应用连集群内 **`rabbitmq-service`** / **`postgres-service`**（见 `k8s/config.yaml`）。
 
-**仍需你手动：** 在能访问 RDS 的机器上（例如 SSH 到 **consumer** 或某台 **server**）用 `psql` 执行 `database/` 下 SQL 初始化表结构；各 EC2 上 `git pull`、打包并启动 **server-v2 / consumer-v3**（JAR 里填 `terraform output` 给出的 `rabbitmq_host`、`postgres_jdbc_url` 及账号密码）。
-
-若 `use_amazon_mq = false` / `use_rds_postgres = false`，则仍会创建对应 **EC2**，需自己在上面安装 RabbitMQ / PostgreSQL。
+**EC2 应用模式（`enable_eks = false`）** 仍需你在数据面 EC2 上装 RabbitMQ/PostgreSQL 或用托管服务；**EKS + 集群内数据面** 则 **`kubectl apply -k ../../k8s/`** 后依赖 manifest 内嵌/挂载的初始化 SQL（见 `k8s/postgres.yaml`）。
 
 **费用：** Amazon MQ + RDS 比两台小 EC2 更贵，作业结束请 `terraform destroy`。
 
@@ -65,10 +69,13 @@ terraform output
 
 ```bash
 aws eks update-kubeconfig --region us-east-1 --name $(terraform output -raw eks_cluster_name)
-kubectl apply -f ../../k8s/
+kubectl apply -k ../../k8s/
 ```
 
-（镜像、ConfigMap 里 MQ/DB 地址需按 `terraform output` 填好；入口用 **AWS Load Balancer Controller + Ingress**，与旧版「Terraform ALB → EC2」不同。）
+- **镜像：** 将 `server-v2` / `consumer-v3` 推到 **ECR**，把 `k8s/server.yaml` / `consumer.yaml` 的 `image` 改为 ECR 地址，并把 `imagePullPolicy` 改为 **`Always`**（不要用 `Never`）。  
+- **Ingress：** 当前 `k8s/ingress.yaml` 为 **NGINX Ingress** class —— 需在 EKS 上安装 **ingress-nginx**（Helm），或改为 **AWS Load Balancer Controller**。  
+- **数据面在集群内时** 不必改 `chat-config` 里的 `MQ_HOST` / `DB_HOST`（已是 `*-service`）。
+- **RabbitMQ 用 EC2 + gp3：** 设置 **`create_ec2_rabbitmq = true`**、**`use_amazon_mq = false`**。Terraform 为该实例配置 **gp3 根卷**（变量 **`rabbitmq_root_volume_*`**），减轻持久化队列下的 **gp2 IOPS credit** 瓶颈。在 EC2 上安装并启动 RabbitMQ 后，把 EKS 里 **`MQ_HOST`**（或 `SPRING_RABBITMQ_HOST`）改为 **`terraform output -raw rabbitmq_private_ip`**，并**不要**再同时使用集群内 `rabbitmq-service`（避免双 broker）。
 
 SSH 用**对应私钥**：
 
@@ -115,7 +122,11 @@ terraform destroy
 | `key_name` | 已有 Key Pair 时用 |
 | `server_count` | 仅 **`enable_eks = false`**：Server EC2 台数 |
 | `enable_alb` | 仅 **EC2 模式**：`false` 可省 ALB，直连某台 server 调试 |
-| `allowed_ssh_cidr` | 尽量写你的 IP/32 |
+| `create_ec2_rabbitmq` | 默认 **null**：EKS 模式下 **不** 建 RabbitMQ EC2；`true` 可强制外置 EC2 broker |
+| `create_ec2_postgres` | 默认 **null**：EKS 模式下 **不** 建 Postgres EC2；`true` 可强制外置 EC2 DB |
+| `rabbitmq_root_volume_*` | 自建 RabbitMQ **EC2** 的根卷：**gp3** + 大小/IOPS/吞吐（默认 40GiB、3000 IOPS、125 MiB/s） |
+| `allowed_ssh_cidr` | **必须**改为你的公网 **IP/32**；**禁止** `0.0.0.0/0` 除非同时设 `permit_unsafe_wide_ssh=true`（仅临时实验） |
+| `permit_unsafe_wide_ssh` | 默认 `false`；仅当故意对全世界开放 SSH 时设 `true`（与 `0.0.0.0/0` 配合） |
 
 ---
 

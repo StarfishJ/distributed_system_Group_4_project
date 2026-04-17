@@ -198,7 +198,7 @@ Handouts often cite **`/api/messages`** and **`/chat`** without a room id. **Thi
 | Handout | In these `.jmx` files |
 |--------|------------------------|
 | **70% reads** | **`GET /health`** (light HTTP) |
-| **30% writes** | **`GET /metrics`** without `refreshMaterializedViews` (heavy read/analytics; stresses DB + cache). *True* chat writes are WebSocket — add the **WebSocket plugin** + `client_part2`-style JSON if the grader insists on wire-format “writes”. |
+| **30% writes** | **`GET /metrics`** without `refreshMaterializedViews` (heavy read/analytics; stresses DB + cache). *True* chat writes are WebSocket — add the **WebSocket plugin** + `client_part2`-style JSON if the grader insists on wire-format “writes”. **Note:** on **Kubernetes** (`k8s/server.yaml`), **`server.metrics.allow-http-mv-refresh=false`** — requests with **`refreshMaterializedViews=true`** return **403**; keep JMeter on plain `/metrics`. |
 
 ### Baseline scenario (~1000 users, ~100K samples, 5 min)
 

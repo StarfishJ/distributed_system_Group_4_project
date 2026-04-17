@@ -1,5 +1,14 @@
-# Local / lab: kubectl apply -k .
+# Pure in-cluster Postgres + RabbitMQ + Redis; apps pull from ECR after you set images below.
 # Order: config & secret → data plane → apps → ingress
+#
+# EKS (replace ACCOUNT + REGION + optional TAG):
+#   cd k8s
+#   kustomize edit set image cs6650-server-v2=ACCOUNT.dkr.ecr.REGION.amazonaws.com/cs6650-server-v2:TAG
+#   kustomize edit set image cs6650-consumer-v3=ACCOUNT.dkr.ecr.REGION.amazonaws.com/cs6650-consumer-v3:TAG
+#   kubectl apply -k .
+#
+# Local Docker Desktop / minikube (images loaded into cluster, short names):
+#   keep the identity images block below, or use: kubectl apply -k .
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -11,3 +20,10 @@ resources:
   - server.yaml
   - consumer.yaml
   - ingress.yaml
+images:
+  - name: cs6650-server-v2
+    newName: cs6650-server-v2
+    newTag: latest
+  - name: cs6650-consumer-v3
+    newName: cs6650-consumer-v3
+    newTag: latest

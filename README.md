@@ -14,7 +14,8 @@ This repository contains the implementation for Assignment 2 (distributed chat) 
 |   |-- client_part2/    # Load testing client with latency/throughput analysis
 |-- monitoring/          # A3: metric collection scripts + DB snapshot SQL + results/
 |-- configuration/       # A3: index of all config file locations (submission)
-|-- deployment/          # systemd service files and ALB configuration notes
+|-- deployment/          # Terraform (AWS/EKS), systemd + ALB notes
+|-- k8s/                 # K8s: in-cluster Postgres, RabbitMQ, Redis, server-v2, consumer-v3
 |-- results/             # CSV exports, metrics JSON, report screenshots (e.g. 50w/, 100w/)
 |-- load-tests/          # A3: batch optimization script, test configs, results CSV
 |-- DatabaseDesignDocument.md   # A3 DB design (≤2 pages PDF target)
@@ -51,7 +52,13 @@ java -jar client/client_part2/target/chat-client-part2-0.0.1-SNAPSHOT.jar --resu
 2. Start RabbitMQ
 3. `java -jar server-v2/target/chat-server-0.0.1-SNAPSHOT.jar`
 4. `java -jar consumer-v3/target/chat-consumer-v3-0.0.1-SNAPSHOT.jar`
-5. Run load test, then `curl http://localhost:8080/metrics?refreshMaterializedViews=true` or `.\monitoring\collect-metrics.ps1 -RefreshMviews`
+5. Run load test, then `curl http://localhost:8080/metrics?refreshMaterializedViews=true` or `.\monitoring\collect-metrics.ps1 -RefreshMviews`  
+   (On **Kubernetes**, HTTP MV refresh is **disabled** by default — use **scheduled refresh** in `server-v2` or enable the property only for trusted dev.)
+
+### AWS EKS — pure in-cluster Postgres / RabbitMQ / Redis
+
+1. **`deployment/terraform`**: `terraform apply` → EKS + VPC (see that **README**; do not enable external MQ/DB if you use in-cluster data plane).  
+2. **`k8s/README.md`**: build/tag/push **`cs6650-server-v2`** and **`cs6650-consumer-v3`**, `kustomize edit set image …`, install **Ingress NGINX**, `kubectl apply -k k8s/`.
 
 ---
 

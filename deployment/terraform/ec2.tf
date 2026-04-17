@@ -1,5 +1,5 @@
 resource "aws_instance" "rabbitmq" {
-  count                  = var.use_amazon_mq ? 0 : 1
+  count                  = local.create_ec2_rabbitmq_effective ? 1 : 0
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type_rabbitmq
   key_name               = local.ec2_key_name
@@ -8,6 +8,15 @@ resource "aws_instance" "rabbitmq" {
 
   user_data = local.user_data_base
 
+  root_block_device {
+    volume_type           = "gp3"
+    volume_size           = var.rabbitmq_root_volume_size
+    iops                  = var.rabbitmq_root_volume_iops
+    throughput            = var.rabbitmq_root_volume_throughput
+    encrypted             = true
+    delete_on_termination = true
+  }
+
   tags = {
     Name = "${var.project_name}-rabbitmq"
     Role = "rabbitmq"
@@ -15,7 +24,7 @@ resource "aws_instance" "rabbitmq" {
 }
 
 resource "aws_instance" "postgres" {
-  count                  = var.use_rds_postgres ? 0 : 1
+  count                  = local.create_ec2_postgres_effective ? 1 : 0
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type_db
   key_name               = local.ec2_key_name

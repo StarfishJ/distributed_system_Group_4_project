@@ -81,20 +81,20 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_db_instance" "postgres" {
   count = var.use_rds_postgres ? 1 : 0
 
-  identifier                 = "${var.project_name}-pg"
-  engine                     = "postgres"
-  engine_version             = var.rds_engine_version
-  instance_class             = var.rds_instance_class
-  allocated_storage          = var.rds_allocated_storage
-  db_name                    = var.rds_database_name
-  username                   = var.rds_master_username
-  password                   = random_password.rds[0].result
-  db_subnet_group_name       = aws_db_subnet_group.main[0].name
-  vpc_security_group_ids     = [aws_security_group.rds[0].id]
-  publicly_accessible        = false
-  skip_final_snapshot        = true
-  delete_automated_backups   = true
-  backup_retention_period    = 0
+  identifier               = "${var.project_name}-pg"
+  engine                   = "postgres"
+  engine_version           = var.rds_engine_version
+  instance_class           = var.rds_instance_class
+  allocated_storage        = var.rds_allocated_storage
+  db_name                  = var.rds_database_name
+  username                 = var.rds_master_username
+  password                 = random_password.rds[0].result
+  db_subnet_group_name     = aws_db_subnet_group.main[0].name
+  vpc_security_group_ids   = [aws_security_group.rds[0].id]
+  publicly_accessible      = false
+  skip_final_snapshot      = true
+  delete_automated_backups = true
+  backup_retention_period  = 0
 
   tags = { Name = "${var.project_name}-rds" }
 }
