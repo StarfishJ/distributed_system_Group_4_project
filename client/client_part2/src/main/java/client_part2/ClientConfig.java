@@ -61,4 +61,9 @@ public final class ClientConfig {
     public static long getThrottleMs() { return getLong("worker.throttleMs", 0); }
     public static int getNumRooms() { return getInt("main.numRooms", 20); }
     public static long[] getBackoffMs() { return getLongArray("worker.backoffMs", new long[] { 500, 1000, 2000, 4000, 8000 }); }
+
+    /** Max local {@code offerFirst} attempts per message after {@code SERVER_BUSY} (each response increments; exceeded → fail). */
+    public static int getMaxServerBusyRetries() {
+        return Math.max(1, getInt("worker.maxServerBusyRetries", 3));
+    }
 }

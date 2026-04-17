@@ -1,5 +1,5 @@
 resource "aws_lb" "main" {
-  count              = var.enable_alb ? 1 : 0
+  count              = local.create_app_ec2 && var.enable_alb ? 1 : 0
   name               = "${var.project_name}-alb"
   internal           = false
   load_balancer_type = "application"
@@ -10,7 +10,7 @@ resource "aws_lb" "main" {
 }
 
 resource "aws_lb_target_group" "servers" {
-  count       = var.enable_alb ? 1 : 0
+  count       = local.create_app_ec2 && var.enable_alb ? 1 : 0
   name        = "${var.project_name}-tg"
   port        = 8080
   protocol    = "HTTP"
@@ -50,7 +50,7 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_lb_target_group_attachment" "server" {
-  count            = var.enable_alb ? var.server_count : 0
+  count            = local.create_app_ec2 && var.enable_alb ? var.server_count : 0
   target_group_arn = aws_lb_target_group.servers[0].arn
   target_id        = aws_instance.server[count.index].id
   port             = 8080

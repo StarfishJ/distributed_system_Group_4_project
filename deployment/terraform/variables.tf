@@ -28,9 +28,43 @@ variable "allowed_ssh_cidr" {
   default     = "0.0.0.0/0"
 }
 
+variable "enable_eks" {
+  type        = bool
+  description = "Provision Amazon EKS for server-v2 + consumer-v3 (recommended). When false, app runs on EC2 + optional ALB (legacy)."
+  default     = true
+}
+
+variable "eks_cluster_version" {
+  type        = string
+  description = "Kubernetes version for EKS control plane"
+  default     = "1.31"
+}
+
+variable "eks_node_instance_types" {
+  type        = list(string)
+  description = "Managed node group instance types (t3.medium matches DesignDocument server node group)"
+  default     = ["t3.medium"]
+}
+
+variable "eks_node_desired_size" {
+  type        = number
+  description = "Desired worker nodes (adjust for consumer + server pods)"
+  default     = 2
+}
+
+variable "eks_node_min_size" {
+  type    = number
+  default = 1
+}
+
+variable "eks_node_max_size" {
+  type    = number
+  default = 6
+}
+
 variable "server_count" {
   type        = number
-  description = "Number of server-v2 instances behind ALB"
+  description = "Number of server-v2 EC2 instances behind ALB (only when enable_eks = false)"
   default     = 2
 }
 
@@ -56,7 +90,7 @@ variable "instance_type_consumer" {
 
 variable "enable_alb" {
   type        = bool
-  description = "Create Application Load Balancer + target group"
+  description = "Create ALB targeting EC2 server-v2 (only when enable_eks = false). With EKS, use AWS Load Balancer Controller + Ingress instead."
   default     = true
 }
 

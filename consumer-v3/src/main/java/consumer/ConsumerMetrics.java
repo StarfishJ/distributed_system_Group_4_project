@@ -22,6 +22,11 @@ public class ConsumerMetrics {
     private final AtomicLong backpressureNacks = new AtomicLong(0);
     private final AtomicLong poisonPayloadRejects = new AtomicLong(0);
 
+    private final AtomicLong dlqReplaySuccess = new AtomicLong(0);
+    private final AtomicLong dlqReplayExhausted = new AtomicLong(0);
+    private final AtomicLong dlqReplayPoisonDiscard = new AtomicLong(0);
+    private final AtomicLong dlqAuditEvidence = new AtomicLong(0);
+
     public void incrementProcessed() { messagesProcessed.incrementAndGet(); }
     public void incrementPublished() { messagesPublished.incrementAndGet(); }
     public void incrementPublishError() { publishErrors.incrementAndGet(); }
@@ -33,6 +38,11 @@ public class ConsumerMetrics {
     public void incrementBackpressureNack() { backpressureNacks.incrementAndGet(); }
     public void incrementPoisonPayloadReject() { poisonPayloadRejects.incrementAndGet(); }
 
+    public void incrementDlqReplaySuccess(long n) { dlqReplaySuccess.addAndGet(n); }
+    public void incrementDlqReplayExhausted(long n) { dlqReplayExhausted.addAndGet(n); }
+    public void incrementDlqReplayPoisonDiscard() { dlqReplayPoisonDiscard.incrementAndGet(); }
+    public void incrementDlqAuditEvidence() { dlqAuditEvidence.incrementAndGet(); }
+
     public long getMessagesProcessed() { return messagesProcessed.get(); }
     public long getMessagesPublished() { return messagesPublished.get(); }
     public long getPublishErrors() { return publishErrors.get(); }
@@ -42,4 +52,9 @@ public class ConsumerMetrics {
     public long getDlqPublished() { return dlqPublished.get(); }
     public long getBackpressureNacks() { return backpressureNacks.get(); }
     public long getPoisonPayloadRejects() { return poisonPayloadRejects.get(); }
+
+    public long getDlqReplaySuccess() { return dlqReplaySuccess.get(); }
+    public long getDlqReplayExhausted() { return dlqReplayExhausted.get(); }
+    public long getDlqReplayPoisonDiscard() { return dlqReplayPoisonDiscard.get(); }
+    public long getDlqAuditEvidence() { return dlqAuditEvidence.get(); }
 }

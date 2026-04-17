@@ -1,0 +1,79 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server-v2
+spec:
+  replicas: 2 # 启动 2 个节点体现分布式
+  selector:
+    matchLabels:
+      app: server-v2
+  template:
+    metadata:
+      labels:
+        app: server-v2
+    spec:
+      containers:
+      - name: server-v2
+        image: chat-server:latest # 本机编译后的镜像名
+        imagePullPolicy: Never # 强制使用本地镜像 (用于学习/调试)
+        ports:
+        - containerPort: 8080
+        env:
+        # 覆盖 Spring Boot 的默认配置
+        - name: SPRING_RABBITMQ_HOST
+          valueFrom: { configMapKeyRef: { name: chat-config, key: MQ_HOST } }
+        - name: SPRING_RABBITMQ_USERNAME
+          valueFrom: { configMapKeyRef: { name: chat-config, key: MQ_USER } }
+        - name: SPRING_RABBITMQ_PASSWORD
+          valueFrom: { secretKeyRef: { name: chat-secret, key: MQ_PASS } }
+        - name: SPRING_DATASOURCE_URL
+          value: "jdbc:postgresql://postgres-service:5432/chatdb"
+        - name: SPRING_DATASOURCE_USERNAME
+          valueFrom: { configMapKeyRef: { name: chat-config, key: DB_USER } }
+        - name: SPRING_DATASOURCE_PASSWORD
+          valueFrom: { secretKeyRef: { name: chat-secret, key: DB_PASS } }
+        # Stable pod name → presence + targeted broadcast routing (see DesignDocument § EKS)
+        - name: SERVER_INSTANCE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: SERVER_REDIS_ENABLED
+          value: "true"
+        - name: SPRING_DATA_REDIS_HOST
+          valueFrom: { configMapKeyRef: { name: chat-config, key: REDIS_HOST } }
+        - name: SPRING_DATA_REDIS_PORT
+          valueFrom: { configMapKeyRef: { name: chat-config, key: REDIS_PORT } }
+        - name: SERVER_BROADCAST_TARGETED
+          value: "true"
+        # Single Postgres in this manifest — disable read-replica JDBC
+        - name: SERVER_METRICS_READ_REPLICA_ENABLED
+          value: "false"
+        # 存活探针：如果持续失败，K8s 会重启 Pod
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        # 就绪探针：服务真正就绪后才允许流量进入
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server-service
+spec:
+  type: ClusterIP # 改为集群内部 IP，外部通过 Ingress 访问
+  selector:
+    app: server-v2
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080

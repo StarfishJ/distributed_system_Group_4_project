@@ -6,3 +6,4 @@
 \ir 01_schema.sql
 \ir 02_indexes.sql
 \ir 03_views.sql
+\ir 05_dlq_audit.sql

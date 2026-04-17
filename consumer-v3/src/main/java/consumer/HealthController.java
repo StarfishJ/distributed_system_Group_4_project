@@ -45,6 +45,10 @@ public class HealthController {
         response.put("dlqPublished", metrics.getDlqPublished());
         response.put("backpressureNacks", metrics.getBackpressureNacks());
         response.put("poisonPayloadRejects", metrics.getPoisonPayloadRejects());
+        response.put("dlqReplayRowsSucceeded", metrics.getDlqReplaySuccess());
+        response.put("dlqReplayRowsExhausted", metrics.getDlqReplayExhausted());
+        response.put("dlqReplayPoisonDiscards", metrics.getDlqReplayPoisonDiscard());
+        response.put("dlqAuditEvidenceRows", metrics.getDlqAuditEvidence());
 
         StatisticsAggregator.Snapshot snap = statisticsAggregator.getLatestSnapshot();
         Map<String, Object> agg = new LinkedHashMap<>();

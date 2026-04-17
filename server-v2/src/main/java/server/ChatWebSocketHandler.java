@@ -2,6 +2,7 @@ package server;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -90,13 +91,18 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         return Mono.empty();
                     }
                     return Mono.fromCallable(() -> {
+                        LinkedHashSet<String> roomsToFlush = new LinkedHashSet<>();
                         boolean allAccepted = true;
                         for (PublishTask task : publishTasks) {
+                            roomsToFlush.add(task.roomId);
                             if (!publisher.publishMessage(task.roomId, task.message)) {
                                 allAccepted = false;
                             }
                         }
                         if (!allAccepted) {
+                            return buildErrorJson("SERVER_BUSY");
+                        }
+                        if (!publisher.flushAndConfirmRooms(roomsToFlush)) {
                             return buildErrorJson("SERVER_BUSY");
                         }
                         return batchStr;
@@ -147,6 +153,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
      * Does NOT touch RabbitMQ. Safe to call on Netty thread.
      */
     private ProcessResult validateAndUpdateState(WebSocketSession session, String roomId, String message, String serverTimestamp) {
+        String messageId = null;
         String userId = null, username = null, msgContent = null, timestamp = null, messageType = null;
 
         try (JsonParser p = JSON_FACTORY.createParser(message)) {
@@ -156,6 +163,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                 p.nextToken();
                 if (fieldName == null) continue;
                 switch (fieldName) {
+                    case "messageId" -> messageId = p.getValueAsString();
                     case "userId" -> userId = p.getValueAsString();
                     case "username" -> username = p.getValueAsString();
                     case "message" -> msgContent = p.getValueAsString();
@@ -207,8 +215,12 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                 serverId = "server-1";
             }
         }
+        String resolvedMessageId = (messageId != null && !messageId.isBlank() && isValidClientMessageId(messageId))
+                ? messageId.trim()
+                : UUID.randomUUID().toString();
+
         ClientMessage msg = new ClientMessage(
-                UUID.randomUUID().toString(),
+                resolvedMessageId,
                 roomId,
                 userId,
                 username,
@@ -294,5 +306,20 @@ public class ChatWebSocketHandler implements WebSocketHandler {
 
     private static boolean isAllowedMessageType(String messageType) {
         return "JOIN".equals(messageType) || "TEXT".equals(messageType) || "LEAVE".equals(messageType);
+    }
+
+    /** Client-supplied id for idempotent retries (same id across resends); 8–64 URL-safe chars. */
+    private static boolean isValidClientMessageId(String s) {
+        if (s == null) return false;
+        String t = s.trim();
+        int n = t.length();
+        if (n < 8 || n > 64) return false;
+        for (int i = 0; i < n; i++) {
+            char c = t.charAt(i);
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+                return false;
+            }
+        }
+        return true;
     }
 }

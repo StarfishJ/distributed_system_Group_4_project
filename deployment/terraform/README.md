@@ -8,13 +8,14 @@
 |------|------|
 | **VPC** | 10.0.0.0/16，DNS 已开 |
 | **Internet Gateway + 公有路由** | 实例可出网 |
-| **2 个公有子网** | 跨 2 个 AZ（ALB 必需） |
-| **安全组 `alb`** | 入站 80（公网）；出站全开 |
-| **安全组 `internal`** | 入站 22（你填的 CIDR）；8080 **仅来自 ALB**；实例间 **互通**（RabbitMQ/Postgres/Server/Consumer） |
-| **EC2 Key Pair** | 若设置 `public_key_path`，由 Terraform **上传你的公钥**（适合从未建过 Key Pair 的账户） |
-| **EC2×(3+N)** | RabbitMQ、Postgres、Consumer 各 1；Server-v2 共 `server_count` 台 |
-| **ALB + Target Group + Listener** | HTTP:80 → Server:8080，`/health`，Cookie 粘性 |
-| **User-data** | 每台装 Java 17 + git |
+| **2 个公有子网** | 跨 2 个 AZ（ALB / EKS 可用） |
+| **Amazon EKS**（默认 **`enable_eks = true`**） | 托管控制面 + **managed node group**（默认 `t3.medium`）；**server-v2 / consumer-v3** 用仓库 `k8s/*.yaml` 部署；安全组已放行节点访问 **RabbitMQ / PostgreSQL**（EC2 或 Amazon MQ / RDS） |
+| **安全组 `alb`** | 仅 **`enable_eks = false`** 时：入站 80；与 **EC2 + ALB** 路径一起用 |
+| **安全组 `internal`** | 入站 22；8080 **来自 ALB**（EC2 模式）；**来自 EKS 节点** 的 5672/15672/5432（数据面在集群外时）；实例间 **互通** |
+| **EC2 Key Pair** | 若设置 `public_key_path`，由 Terraform **上传你的公钥** |
+| **EC2 数据面**（可选） | **`enable_eks = false`** 时：RabbitMQ、Postgres、Consumer 各 1；Server-v2 共 `server_count` 台 + **ALB** |
+| **ALB + Target Group** | 仅 **EC2 应用模式**（`enable_eks = false` 且 `enable_alb = true`） |
+| **User-data** | 数据面 EC2：Java 17 + git |
 
 **托管服务（在 `terraform.tfvars` 里设 `use_amazon_mq` / `use_rds_postgres` 为 `true`；变量默认 `false`，即默认仍为 EC2 跑 MQ/DB）：**
 
@@ -60,6 +61,15 @@ terraform apply
 terraform output
 ```
 
+**EKS 模式（默认）** 在 apply 后：
+
+```bash
+aws eks update-kubeconfig --region us-east-1 --name $(terraform output -raw eks_cluster_name)
+kubectl apply -f ../../k8s/
+```
+
+（镜像、ConfigMap 里 MQ/DB 地址需按 `terraform output` 填好；入口用 **AWS Load Balancer Controller + Ingress**，与旧版「Terraform ALB → EC2」不同。）
+
 SSH 用**对应私钥**：
 
 ```bash
@@ -99,10 +109,12 @@ terraform destroy
 
 | 变量 | 说明 |
 |------|------|
+| `enable_eks` | 默认 `true`：创建 **EKS**，不在 EC2 上跑 server/consumer |
+| `eks_*` | 集群版本、节点类型、`desired_size`（见 `variables.tf`） |
 | `public_key_path` | 空白账户：填公钥路径，Terraform 创建 Key Pair |
 | `key_name` | 已有 Key Pair 时用 |
-| `server_count` | Server 节点数 |
-| `enable_alb` | `false` 时可省 ALB 钱，直连某台 server 公网调试 |
+| `server_count` | 仅 **`enable_eks = false`**：Server EC2 台数 |
+| `enable_alb` | 仅 **EC2 模式**：`false` 可省 ALB，直连某台 server 调试 |
 | `allowed_ssh_cidr` | 尽量写你的 IP/32 |
 
 ---

@@ -1,6 +1,7 @@
 package client_part2;
 
 import java.time.Instant;
+import java.util.UUID;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -269,6 +270,7 @@ public class MessageGenerator implements Runnable {
         }
 
         ClientMessage msg = new ClientMessage();
+        msg.setMessageId(UUID.randomUUID().toString());
         msg.setUserId(userId);
         msg.setUsername("user" + userId);
         msg.setMessage(MESSAGES[rnd.nextInt(MESSAGES.length)]);

@@ -9,8 +9,8 @@ import java.util.List;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * Broadcast Listener: listens on the anonymous fanout queue to receive
- * messages from the global Consumer and pushes them to local clients.
+ * Broadcast Listener: subscribes to {@code broadcastSubscriptionQueue} (fanout anonymous queue by default,
+ * or durable topic-bound queue when {@code server.broadcast.targeted=true}).
  */
 @Component
 public class BroadcastListener {
@@ -30,7 +30,7 @@ public class BroadcastListener {
      * Listen on the anonymous auto-delete queue.
      * Handles both individual ClientMessage and List<ClientMessage> (batches).
      */
-    @RabbitListener(queues = "#{anonymousBroadcastQueue.name}", 
+    @RabbitListener(queues = "#{broadcastSubscriptionQueue.name}",
                     concurrency = "${server.broadcast.concurrency:10}")
     public void onBroadcastMessage(Object rawMessage) {
         try {

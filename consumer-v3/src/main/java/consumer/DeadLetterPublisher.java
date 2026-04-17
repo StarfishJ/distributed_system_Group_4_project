@@ -8,8 +8,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 
 /**
- * Publishes failed messages to the Dead Letter Exchange (chat.dlx).
- * Messages land in chat.dead-letter queue for inspection and replay.
+ * Publishes DB write failures to the dedicated replay exchange {@link RabbitMQConfig#DB_REPLAY_EXCHANGE}.
+ * Poison / TTL overflow from room queues still go to the fanout {@link RabbitMQConfig#DLX_EXCHANGE}
+ * and accumulate in {@link RabbitMQConfig#DLQ_NAME} — not mixed with replay batches.
  */
 @Service
 public class DeadLetterPublisher {
@@ -27,8 +28,8 @@ public class DeadLetterPublisher {
     public void publishToDlq(List<ClientMessage> messages) {
         if (messages == null || messages.isEmpty()) return;
         try {
-            rabbitTemplate.convertAndSend(RabbitMQConfig.DLX_EXCHANGE, "", messages);
-            log.warn("Published {} failed message(s) to DLQ", messages.size());
+            rabbitTemplate.convertAndSend(RabbitMQConfig.DB_REPLAY_EXCHANGE, RabbitMQConfig.DB_REPLAY_ROUTING_KEY, messages);
+            log.warn("Published {} failed message(s) to db-replay queue for later persist", messages.size());
             metrics.incrementDlqPublished(messages.size());
         } catch (Exception e) {
             log.error("Failed to publish to DLQ: {}", e.getMessage());

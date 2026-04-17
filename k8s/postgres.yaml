@@ -1,0 +1,109 @@
+---
+# 1. 存储卷声明：保证数据库重启后数据不丢失
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# 2. 初始化脚本：将 SQL 文件挂载进容器
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+data:
+  01_schema.sql: |
+    -- CS6650 Assignment 3: Chat Message Persistence Schema
+    DROP TABLE IF EXISTS messages CASCADE;
+    CREATE TABLE messages (
+        message_id    VARCHAR(64)   NOT NULL PRIMARY KEY,
+        room_id       VARCHAR(64)   NOT NULL,
+        user_id       VARCHAR(64)   NOT NULL,
+        username      VARCHAR(128),
+        message       TEXT,
+        message_type  VARCHAR(32),
+        timestamp_raw VARCHAR(64),
+        timestamp_utc TIMESTAMPTZ   NOT NULL,
+        server_id     VARCHAR(64),
+        client_ip     VARCHAR(45),
+        created_at    TIMESTAMPTZ   DEFAULT NOW()
+    );
+  02_indexes.sql: |
+    CREATE INDEX idx_messages_room_time ON messages (room_id, timestamp_utc ASC);
+    CREATE INDEX idx_messages_user_time ON messages (user_id, timestamp_utc ASC);
+    CREATE INDEX idx_messages_timestamp_user ON messages (timestamp_utc, user_id);
+    CREATE INDEX idx_messages_user_room_time ON messages (user_id, room_id, timestamp_utc DESC);
+    CREATE INDEX idx_messages_room_count ON messages (room_id);
+  03_views.sql: |
+    CREATE MATERIALIZED VIEW mv_user_rooms AS
+    SELECT user_id, room_id, MAX(timestamp_utc) AS last_activity, COUNT(*) AS message_count
+    FROM messages GROUP BY user_id, room_id;
+    CREATE UNIQUE INDEX idx_mv_user_rooms_pk ON mv_user_rooms (user_id, room_id);
+    CREATE MATERIALIZED VIEW mv_messages_per_minute AS
+    SELECT date_trunc('minute', timestamp_utc) AS minute_bucket, COUNT(*) AS message_count
+    FROM messages GROUP BY date_trunc('minute', timestamp_utc);
+    CREATE MATERIALIZED VIEW mv_user_activity AS
+    SELECT user_id, COUNT(*) AS message_count FROM messages GROUP BY user_id;
+    CREATE MATERIALIZED VIEW mv_room_activity AS
+    SELECT room_id, COUNT(*) AS message_count FROM messages GROUP BY room_id;
+
+---
+# 3. 数据库部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        env:
+        - name: POSTGRES_DB
+          valueFrom: { configMapKeyRef: { name: chat-config, key: DB_NAME } }
+        - name: POSTGRES_USER
+          valueFrom: { configMapKeyRef: { name: chat-config, key: DB_USER } }
+        - name: POSTGRES_PASSWORD
+          valueFrom: { secretKeyRef: { name: chat-secret, key: DB_PASS } }
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: postgredb-data
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+      volumes:
+      - name: postgredb-data
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: init-scripts
+        configMap:
+          name: postgres-init-scripts
+
+---
+# 4. 数据库服务：供其他 Pod 访问
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+spec:
+  selector:
+    app: postgres
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432

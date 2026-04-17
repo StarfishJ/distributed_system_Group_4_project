@@ -1,0 +1,50 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer-v3
+spec:
+  replicas: 1 # 消费者通常 1 个就够，除非你想测试并行写性能
+  selector:
+    matchLabels:
+      app: consumer-v3
+  template:
+    metadata:
+      labels:
+        app: consumer-v3
+    spec:
+      containers:
+      - name: consumer-v3
+        image: chat-consumer:latest # 本机编译后的镜像名
+        imagePullPolicy: Never
+        env:
+        - name: SPRING_RABBITMQ_HOST
+          valueFrom: { configMapKeyRef: { name: chat-config, key: MQ_HOST } }
+        - name: SPRING_RABBITMQ_USERNAME
+          valueFrom: { configMapKeyRef: { name: chat-config, key: MQ_USER } }
+        - name: SPRING_RABBITMQ_PASSWORD
+          valueFrom: { secretKeyRef: { name: chat-secret, key: MQ_PASS } }
+        - name: SPRING_DATASOURCE_URL
+          value: "jdbc:postgresql://postgres-service:5432/chatdb?rewriteBatchedInserts=true"
+        - name: SPRING_DATASOURCE_USERNAME
+          valueFrom: { configMapKeyRef: { name: chat-config, key: DB_USER } }
+        - name: SPRING_DATASOURCE_PASSWORD
+          valueFrom: { secretKeyRef: { name: chat-secret, key: DB_PASS } }
+        - name: CONSUMER_REDIS_ENABLED
+          value: "true"
+        - name: SPRING_DATA_REDIS_HOST
+          valueFrom: { configMapKeyRef: { name: chat-config, key: REDIS_HOST } }
+        - name: SPRING_DATA_REDIS_PORT
+          valueFrom: { configMapKeyRef: { name: chat-config, key: REDIS_PORT } }
+        - name: CONSUMER_BROADCAST_TARGETED
+          value: "true"
+        livenessProbe:
+          httpGet:
+            path: /health # 注意：consumer 这里的路径映射可能也需要检查，通常 Spring Boot 是 /actuator/health
+            port: 8081
+          initialDelaySeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 15

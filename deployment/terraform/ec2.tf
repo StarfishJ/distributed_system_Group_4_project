@@ -31,7 +31,7 @@ resource "aws_instance" "postgres" {
 }
 
 resource "aws_instance" "server" {
-  count                  = var.server_count
+  count                  = local.create_app_ec2 ? var.server_count : 0
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type_server
   key_name               = local.ec2_key_name
@@ -47,6 +47,7 @@ resource "aws_instance" "server" {
 }
 
 resource "aws_instance" "consumer" {
+  count                  = local.create_app_ec2 ? 1 : 0
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type_consumer
   key_name               = local.ec2_key_name

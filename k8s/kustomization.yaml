@@ -1,0 +1,13 @@
+# Local / lab: kubectl apply -k .
+# Order: config & secret → data plane → apps → ingress
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - config.yaml
+  - secret.yaml
+  - postgres.yaml
+  - rabbitmq.yaml
+  - redis.yaml
+  - server.yaml
+  - consumer.yaml
+  - ingress.yaml

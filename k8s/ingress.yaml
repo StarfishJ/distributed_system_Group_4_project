@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chat-ingress
+  annotations:
+    # 使用基础的 NGINX 配置
+    kubernetes.io/ingress.class: nginx
+    # WebSocket 必须配置：防止因超时导致连接断开 (这里设为 1 小时)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  rules:
+  - host: chat.local # 你可以在开发环境修改 hosts 文件指向它
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: server-service
+            port:
+              number: 8080

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chat-config
+data:
+  # 数据库连接配置 (对应的是在 K8s 内部的服务名)
+  DB_HOST: postgres-service
+  DB_PORT: "5432"
+  DB_NAME: chatdb
+  DB_USER: chat
+  # RabbitMQ 连接配置
+  MQ_HOST: rabbitmq-service
+  MQ_PORT: "5672"
+  MQ_USER: guest
+  # Redis（与 redis-service 对齐）
+  REDIS_HOST: redis-service
+  REDIS_PORT: "6379"

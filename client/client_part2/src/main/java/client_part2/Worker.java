@@ -5,10 +5,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -36,11 +37,19 @@ public class Worker implements Runnable {
     private static volatile boolean loggedFirstError;
     private static volatile boolean loggedFirstClose;
 
+    /** Drop duplicate broadcast lines (same messageId) to avoid double-counting lag metrics. */
+    private static final java.util.Set<String> SEEN_BROADCAST_IDS = ConcurrentHashMap.newKeySet();
+    private static final int BROADCAST_DEDUP_MAX = 200_000;
+
     private final BlockingDeque<ClientMessage> queue;
     private final String serverBaseUrl;
     private final Metrics metrics;
     private final int roomId;
     private final int maxMessages;
+
+    /** Per {@code messageId}: count of SERVER_BUSY responses; capped to avoid starving the queue via offerFirst. */
+    private final ConcurrentHashMap<String, AtomicInteger> serverBusyRetries = new ConcurrentHashMap<>();
+    private volatile boolean loggedServerBusyExhausted;
 
     public Worker(BlockingQueue<ClientMessage> queue, String serverBaseUrl, Metrics metrics, int workerId) {
         this(queue, serverBaseUrl, metrics, workerId, 0);
@@ -52,6 +61,18 @@ public class Worker implements Runnable {
         this.metrics = metrics;
         this.roomId = (workerId % ClientConfig.getNumRooms()) + 1;
         this.maxMessages = maxMessages <= 0 ? 0 : maxMessages;
+    }
+
+    /** Extracts a quoted JSON string field value, e.g. {@code "messageId":"abc"} → {@code abc}. */
+    private static String extractJsonStringField(String line, String field) {
+        if (line == null || field == null) return null;
+        String key = "\"" + field + "\":\"";
+        int i = line.indexOf(key);
+        if (i < 0) return null;
+        int start = i + key.length();
+        int end = line.indexOf('"', start);
+        if (end <= start) return null;
+        return line.substring(start, end);
     }
 
     private static String toWsUrl(String url) {
@@ -112,8 +133,16 @@ public class Worker implements Runnable {
                     // FIX: Only poll and calculate latency if this is a status response from the server.
                     // Broadcast messages (which lack "status") should be ignored.
                     if (!isOk && !isError) {
-                        // This is a broadcast message. Extract timestamp to calculate Consumer Lag.
-                        // We use a simple string search to avoid full JSON parsing for every broadcast.
+                        String bMid = extractJsonStringField(line, "messageId");
+                        if (bMid != null && !bMid.isEmpty()) {
+                            if (SEEN_BROADCAST_IDS.size() >= BROADCAST_DEDUP_MAX) {
+                                SEEN_BROADCAST_IDS.clear();
+                            }
+                            if (!SEEN_BROADCAST_IDS.add(bMid)) {
+                                continue;
+                            }
+                        }
+                        // Broadcast: extract timestamp to calculate Consumer Lag (string search, no full parse).
                         int tsIndex = line.indexOf("\"timestamp\":");
                         if (tsIndex != -1) {
                             int start = tsIndex + 12;
@@ -151,12 +180,37 @@ public class Worker implements Runnable {
                     if (isOk) {
                         successCount.incrementAndGet();
                         metrics.recordSuccessWithDetails(roomId, msgType, latencyMs);
+                        if (rec.originalMsg != null) {
+                            String mid = rec.originalMsg.getMessageId();
+                            if (mid != null && !mid.isEmpty()) {
+                                serverBusyRetries.remove(mid);
+                            }
+                        }
                     } else {
                         if (line.contains("SERVER_BUSY")) {
-                            // Backpressure: re-queue the original message at the front
+                            // Backpressure: re-queue at front with same messageId (idempotent DB). Cap local retries for fairness.
                             if (rec.originalMsg != null) {
-                                if (!queue.offerFirst(rec.originalMsg)) {
-                                    metrics.recordFail(); // Queue full, really failed
+                                String mid = rec.originalMsg.getMessageId();
+                                if (mid == null || mid.isEmpty()) {
+                                    metrics.recordFail();
+                                } else {
+                                    int maxBusy = ClientConfig.getMaxServerBusyRetries();
+                                    AtomicInteger ctr = serverBusyRetries.computeIfAbsent(mid, k -> new AtomicInteger(0));
+                                    int n = ctr.incrementAndGet();
+                                    if (n > maxBusy) {
+                                        serverBusyRetries.remove(mid);
+                                        metrics.recordFail();
+                                        if (!loggedServerBusyExhausted) {
+                                            loggedServerBusyExhausted = true;
+                                            System.err.println("[Worker] SERVER_BUSY local retries exceeded (" + maxBusy
+                                                    + ") for messageId=" + mid + " room=" + roomId);
+                                        }
+                                    } else {
+                                        if (!queue.offerFirst(rec.originalMsg)) {
+                                            ctr.decrementAndGet();
+                                            metrics.recordFail();
+                                        }
+                                    }
                                 }
                             }
                         } else {

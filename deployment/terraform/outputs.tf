@@ -1,6 +1,34 @@
 output "alb_dns_name" {
-  description = "Point load test client here (HTTP 80)"
-  value       = var.enable_alb ? aws_lb.main[0].dns_name : null
+  description = "EC2 path: point load test client here (HTTP 80). Null when using EKS (use Ingress / LB Controller instead)."
+  value       = local.create_app_ec2 && var.enable_alb ? aws_lb.main[0].dns_name : null
+}
+
+# --- EKS ---
+
+output "eks_cluster_name" {
+  description = "EKS cluster name (kubectl config use-context)"
+  value       = var.enable_eks ? module.eks[0].cluster_name : null
+}
+
+output "eks_cluster_endpoint" {
+  description = "Kubernetes API endpoint"
+  value       = var.enable_eks ? module.eks[0].cluster_endpoint : null
+}
+
+output "eks_cluster_certificate_authority_data" {
+  description = "For kubeconfig / CI"
+  value       = var.enable_eks ? module.eks[0].cluster_certificate_authority_data : null
+  sensitive   = true
+}
+
+output "eks_node_security_group_id" {
+  description = "Attached to worker nodes; use in SG rules for ElastiCache / extra data stores"
+  value       = var.enable_eks ? module.eks[0].node_security_group_id : null
+}
+
+output "configure_kubectl" {
+  description = "AWS CLI v2: update kubeconfig after apply"
+  value       = var.enable_eks ? "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks[0].cluster_name}" : null
 }
 
 # --- RabbitMQ: Amazon MQ OR self-hosted EC2 ---
@@ -75,7 +103,8 @@ output "postgres_private_ip" {
 # --- App EC2 ---
 
 output "server_public_ips" {
-  value = aws_instance.server[*].public_ip
+  description = "EC2 server-v2 only (empty when enable_eks = true)"
+  value       = aws_instance.server[*].public_ip
 }
 
 output "server_private_ips" {
@@ -83,11 +112,11 @@ output "server_private_ips" {
 }
 
 output "consumer_public_ip" {
-  value = aws_instance.consumer.public_ip
+  value = length(aws_instance.consumer) > 0 ? aws_instance.consumer[0].public_ip : null
 }
 
 output "consumer_private_ip" {
-  value = aws_instance.consumer.private_ip
+  value = length(aws_instance.consumer) > 0 ? aws_instance.consumer[0].private_ip : null
 }
 
 output "ec2_key_pair_name" {

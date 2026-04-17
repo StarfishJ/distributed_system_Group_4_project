@@ -1,5 +1,9 @@
 package server;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -97,22 +101,64 @@ public class MessagePublisher {
         buffer.messages.clear();
         buffer.timerActive = false;
 
+        flushAndWaitConfirm(roomId, buffer, batch);
+    }
+
+    /**
+     * Flush any non-empty per-room buffers for the given rooms and wait for broker publisher confirms
+     * on each send. Call this before telling the client {@code QUEUED} so the response is not fire-and-forget.
+     */
+    public boolean flushAndConfirmRooms(Collection<String> roomIds) {
+        LinkedHashSet<String> distinct = new LinkedHashSet<>(roomIds);
+        for (String roomId : distinct) {
+            RoomBuffer buffer = roomBuffers.get(roomId);
+            if (buffer == null) continue;
+            synchronized (buffer) {
+                if (buffer.messages.isEmpty()) continue;
+                List<ClientMessage> batch = new ArrayList<>(buffer.messages);
+                buffer.messages.clear();
+                buffer.timerActive = false;
+                if (!flushAndWaitConfirm(roomId, buffer, batch)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Publish {@code batch} and block until the broker ACKs the publisher confirm (or nack / error).
+     * On failure, restores {@code batch} to the front of {@code buffer} so callers can retry.
+     *
+     * @return true if the broker acknowledged the publisher confirm
+     */
+    private boolean flushAndWaitConfirm(String roomId, RoomBuffer buffer, List<ClientMessage> batch) {
+        if (batch.isEmpty()) {
+            return true;
+        }
         try {
-            // Decouple Room ID from Queue ID using hashing
-            // This allows unlimited rooms while reusing the 20 MQs
             int queueIndex = Math.abs(roomId.hashCode()) % 20 + 1;
             String routingKey = "room." + queueIndex;
-            
-            // We already checked permission in publishMessage, but we execute under CB for monitoring
-            circuitBreaker.executeRunnable(() ->
-                rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, routingKey, batch));
+            circuitBreaker.executeSupplier(() -> {
+                rabbitTemplate.invoke(ops -> {
+                    ops.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, routingKey, batch);
+                    return null;
+                });
+                return true;
+            });
             metrics.incrementPublished();
-            if (log.isDebugEnabled()) log.debug("Flushed upstream batch: room={}, size={}", roomId, batch.size());
+            if (log.isDebugEnabled()) log.debug("Flushed upstream batch (confirmed): room={}, size={}", roomId, batch.size());
+            return true;
+        } catch (CallNotPermittedException e) {
+            buffer.messages.addAll(0, batch);
+            buffer.timerActive = !buffer.messages.isEmpty();
+            return false;
         } catch (Exception e) {
-            // On error, we log but don't re-queue here to avoid infinite loops
-            // The client will handle retries because it won't get an ACK for these messages
             log.error("Failed to publish batch to RabbitMQ: roomId={}, error={}", roomId, e.getMessage());
             metrics.incrementPublishError();
+            buffer.messages.addAll(0, batch);
+            buffer.timerActive = !buffer.messages.isEmpty();
+            return false;
         }
     }
 }
