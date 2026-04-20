@@ -1,0 +1,55 @@
+#!/bin/bash
+# CS6650 server-v2: S3 artifacts + systemd (ASG)
+set -euo pipefail
+exec > >(tee /var/log/cs6650-server-bootstrap.log) 2>&1
+
+dnf update -y
+dnf install -y java-17-amazon-corretto-headless
+
+REGION="${region}"
+BUCKET="${bucket}"
+PREFIX="${prefix}"
+
+mkdir -p /home/ec2-user/app
+cd /home/ec2-user/app
+
+if ! command -v aws >/dev/null 2>&1; then
+  dnf install -y aws-cli
+fi
+
+for attempt in $(seq 1 90); do
+  if aws s3 cp "s3://$BUCKET/$PREFIX/server-v2.jar" ./server-v2.jar --region "$REGION" \
+    && aws s3 cp "s3://$BUCKET/$PREFIX/server.env" ./server.env --region "$REGION"; then
+    break
+  fi
+  echo "Waiting for S3 artifacts s3://$BUCKET/$PREFIX/ ... ($attempt/90)"
+  sleep 10
+done
+
+test -s ./server-v2.jar || { echo "server-v2.jar missing or empty"; exit 1; }
+test -s ./server.env || { echo "server.env missing or empty"; exit 1; }
+chown ec2-user:ec2-user /home/ec2-user/app/server-v2.jar /home/ec2-user/app/server.env
+
+cat >/etc/systemd/system/cs6650-server.service <<'UNIT'
+[Unit]
+Description=cs6650 server-v2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/app
+EnvironmentFile=/home/ec2-user/app/server.env
+ExecStart=/usr/bin/java -jar /home/ec2-user/app/server-v2.jar
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/ec2-user/app/server.log
+StandardError=append:/home/ec2-user/app/server.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now cs6650-server

@@ -6,164 +6,184 @@
 
 ## 1. Architecture Selection Rationale
 
-We use a **decoupled, event-driven** topology so the WebSocket edge can scale independently from persistence and broadcast fan-out.
+## Why We Selected Member D (Alvin)
 
-**Why this shape fits the workload**
+A comparison of all four members' technical stacks is as follows:
 
-1. **Stateless edge (`server-v2`).** Netty/WebFlux handles concurrent WebSocket sessions. The server **does not** insert chat rows; it validates, batches, and **publishes to RabbitMQ** with **publisher confirms** before replying **`QUEUED`** to clients. This keeps ingress fast and failure modes explicit (**`SERVER_BUSY`** when the broker rejects load).
+| Dimension | A (Molly) | B (Yifan) | C (Echo) | D (Alvin) |
+|-----------|-----------|-----------|----------|-----------|
+| Broker | RabbitMQ | RabbitMQ | RabbitMQ | RabbitMQ |
+| DB Layer | EC2 Postgres | EC2 Postgres | EC2 Postgres | EC2 Postgres |
+| Caching | None | None | None | None |
+| Materialized Views | No | No | No | **Yes** |
+| Read Replica Support | No | No | No | **Implemented (configurable)** |
+| Redis Dedup / Cache | No | No | No | **Implemented (configurable)** |
+| Optimization Surface | Minimal | Limited | Moderate | **Largest** |
 
-2. **Single writer to PostgreSQL (`consumer-v3`).** All **`INSERT INTO messages … ON CONFLICT DO NOTHING`** run in the consumer after ordered consumption from **20 room queues** (`room.1`–`room.20`). Sharding uses **`Math.abs(roomId.hashCode()) % 20 + 1`** while preserving the real **`roomId`** in the payload for delivery and analytics. One writer path avoids split-brain persistence and simplifies idempotency.
+### Three Core Reasons for Selecting Member D
 
-3. **RabbitMQ as the backplane.** Ingress uses a **topic exchange**; broadcast uses **fan-out** (`chat.broadcast`) by default, with an optional **topic exchange** (`chat.broadcast.topic`) for **targeted** delivery when Redis presence is available. This separates **ingress backpressure** (queue depth, publish confirms) from **broadcast amplification** (copies per server).
+**1. Broadest Index and Query Coverage**
 
-4. **Observability and contention control.** **`GET /health`** supports ALB probes; **`GET /metrics`** is analytics-heavy and is isolated from the hot path using **caching (Caffeine + optional Redis)**, **materialized views**, and an optional **read JDBC URL** (locally: PgBouncer read pool; in AWS: RDS read replica). **REFRESH MATERIALIZED VIEW** always runs on the **primary** datasource, never on a read-only replica connection.
+Member D's database document defines five indexes, each explicitly mapped to a specific Core Query requirement (room timeline, user history, active users in window, grouping fallback, and analytics). Materialized views (`mv_user_rooms`, `mv_messages_per_minute`, `mv_user_activity`, `mv_room_activity`) are also defined, with the `MetricsService` automatically falling back to raw table scans when an MV is absent. This layered approach provides a solid foundation for query optimization work.
 
-**Tradeoff summary:** We accept **operational complexity** (broker + DB + optional Redis) in exchange for **horizontal scaling**, **clear failure semantics**, and **measurable** load-test behavior under JMeter.
+**2. Read/Write Separation is Already Implemented**
+
+Although the current deployment uses a single EC2 Postgres instance (same as other members), Member D's codebase already implements a `server.metrics.read-replica.jdbc-url` configuration switch. When enabled, read-heavy `/metrics` queries are routed to a separate JDBC URL while writes remain on the primary — a concrete, verifiable optimization path that does not require architectural changes to demonstrate.
+
+**3. Most Actionable Optimization Surface**
+
+Member D's architecture additionally includes Redis-based deduplication and a Caffeine in-process cache, both implemented and toggled via configuration flags (`server.redis.enabled`, `consumer.redis.enabled`). This means the final project can demonstrate measurable improvements across multiple independent dimensions — caching, read isolation, and materialized view refresh strategy — rather than being limited to a single area.
+
+---
+## 2. Optimizations
+
+§2.1–2.4 each owned by one member. Evidence strategy: §4 JMeter baseline is the shared "after" anchor; targeted evidence (CSV, JTL slice, CloudWatch) cited per section; estimated "before" figures labeled †; scope explicitly stated where no isolation run was done.
 
 ---
 
-## 2. Optimization 1 — Redis-Backed Dedup, Broadcast Gating, and Presence (7.5 points)
+### 2.1 Redis Deduplication and `/metrics` Read-Through Cache — *Alvin*
 
-### 2.1 What was optimized and why (tradeoffs)
+**Motivation.** Consumer restarts cause RabbitMQ to redeliver unacked messages, triggering redundant `batchUpsert` and duplicate fan-out. Every `GET /metrics` also hit PostgreSQL directly with no caching.
 
-**Problem.** After restarts or redeliveries, the consumer can repeat work: redundant **`batchUpsert`** attempts and duplicate **fan-out** publishes for the same **`messageId`**. The server also needs a **shared** view of which replicas have users in a room to avoid **O(number of servers)** useless deliveries when using targeted broadcast.
+**What changed.**
+- *Materialized Views (prerequisite).* `MetricsService` prefers `mv_messages_per_minute`, `mv_user_activity`, `mv_room_activity`, `mv_user_rooms` over raw `GROUP BY` scans. `MaterializedViewRefreshScheduler` refreshes on cron; falls back to table scans when absent (`database/03_views.sql`).
+- *Redis cache.* `server.redis.enabled=true` → `MetricsResponseRedisCache` stores `GET /metrics` JSON under `metrics:v1:full:{sha256(cacheKey)}` (TTL 30 s). Cache hit = zero SQL. Invalidated via `SCAN + DEL` on MV refresh.
+- *Consumer dedup.* `consumer.redis.enabled=true` → `chat:consumer:persisted:{messageId}` written after `batchUpsert`; `SETNX chat:consumer:broadcast:{messageId}` gates fan-out. `ON CONFLICT DO NOTHING` remains the SQL safety net.
 
-**Optimization.** Enable **`consumer.redis.enabled=true`** and **`server.redis.enabled=true`**:
+**Tradeoffs.** Redis becomes a required dependency; TTLs tunable via `consumer.redis.persisted-ttl-hours` / `consumer.redis.broadcast-ttl-hours`.
 
-- **`chat:consumer:persisted:{messageId}`** — set after successful DB batch persist so redeliveries skip useless writes (SQL **`ON CONFLICT`** remains the safety net).
-- **`SETNX chat:consumer:broadcast:{messageId}`** — gates fan-out/topic publish so the same logical message is not re-broadcast after recovery.
-- **`presence:room:{roomId}`** — Redis **SET** of sanitized **`server.instance-id`** suffixes, maintained on join/leave and heartbeat, consumed by the consumer when **`consumer.broadcast.targeted=true`**.
+**Key classes.** `ConsumerDedupRedisService`, `MetricsResponseRedisCache`, `MaterializedViewRefreshScheduler`.
 
-**Tradeoffs.** We add a **hard dependency** on Redis for these behaviors when enabled; **staleness** in presence is possible (eventually consistent), mitigated by **fan-out fallback** when the set is empty. Ops must monitor Redis memory and TTL settings (**`consumer.redis.*-ttl-hours`**, **`server.presence.*`**).
-
-### 2.2 Implementation details (repository)
-
-- **Consumer:** `ConsumerDedupRedisService`, `MessageConsumer` wiring; keys documented in `DesignDocument.md`.
-- **Server:** `PresenceRegistry`, `MetricsResponseRedisCache`, `server.redis.*` and `spring.data.redis.*` in `application.properties`.
-- **Kubernetes:** `redis.yaml`, `chat-config` **`REDIS_HOST`**, env **`CONSUMER_REDIS_ENABLED`**, **`SERVER_REDIS_ENABLED`** in `consumer.yaml` / `server.yaml`.
-
-### 2.3 Performance impact measurement
-
-**Method.** Same JMeter plan (**`assignment-baseline-100k-5min.jmx`**: 700×`/health` + 300×`/metrics`, 100k samples). Compare **Configuration A** (Redis features **off**) vs **Configuration B** (Redis **on**, targeted broadcast optional but consistent across server and consumer).
-
-**Metrics to capture (HTML report):** Average, **p95**, **p99**, **Throughput**, **Error %**; plus **Consumer CPU** and **RabbitMQ queue depth** during the run (appendix screenshots).
-
-**Example results table (replace with your measured numbers):**
-
-| Metric | Baseline (Redis off) | Optimized (Redis on) | Δ |
-|--------|----------------------|----------------------|---|
-| Throughput (HTTP req/s) | *e.g. 1,634* | *fill after run* | *%* |
-| p95 latency (ms) | *fill* | *fill* | *%* |
-| p99 latency (ms) | *fill* | *fill* | *%* |
-| Error rate | *0%* | *target 0%* | — |
-
-*Interpretation:* Redis reduces duplicate **consumer** work and **broker** chatter under redelivery scenarios; under a **clean** JMeter HTTP-only run the delta may be **modest**—highlight **consumer-side** and **MQ** graphs when duplicates are injected (restart consumer mid-test) to show the benefit.
+**Performance impact.** `/metrics` average and p95 from §4 JTL (Redis on, MVs in place). Estimated prior †: no cache + no MVs → full `GROUP BY` over ~500K rows per request; `/metrics` p95 plausibly **> 2× measured** under 300 concurrent threads. Dedup benefit is correctness under failure, not steady-state throughput — no JMeter delta expected.
 
 ---
 
-## 3. Optimization 2 — Metrics Read-Path Isolation and Caching (7.5 points)
+### 2.2 Targeted Broadcast via Redis Presence — *Echo*
 
-### 3.1 What was optimized and why (tradeoffs)
+**Motivation.** `chat.broadcast` fan-out delivers every message to all S server nodes — O(S) broker deliveries per message, most discarded immediately after local `roomId` filtering.
 
-**Problem.** **`GET /metrics`** issues heavy **SELECT** workloads (and MV-backed aggregates). On a single PostgreSQL endpoint, analytics reads **contend** with **`consumer-v3`** **write** traffic (connection slots, I/O).
+**What changed.** `server.broadcast.targeted=true` + `consumer.broadcast.targeted=true`: `PresenceRegistry` maintains `presence:room:{roomId}` (SET of instance suffixes) via `SADD` on join, `SREM` on last-session leave, and `PresenceHeartbeat` TTL refresh. On flush, `flushBroadcast()` reads `SMEMBERS presence:room:{roomId}` and publishes once per member to `chat.broadcast.topic` with routing key `srv.{suffix}`. Each server binds only its own queue. Empty presence set → automatic fallback to `chat.broadcast` fan-out.
 
-**Optimization.**
+**Tradeoffs.** Presence is eventually consistent — stale entries cause at most a few extra deliveries, never missed ones. Stable `server.instance-id` required across restarts.
 
-1. **Separate JDBC for reads** when **`server.metrics.read-replica.enabled=true`**: **`server.metrics.read-replica.jdbc-url`** serves **`MetricsService`** **`jdbcRead`**; **`spring.datasource`** remains **primary** for **`REFRESH MATERIALIZED VIEW`** and maintenance.
-2. **Response caching:** **Caffeine** plus optional **Redis** JSON cache (**`metrics:v1:*`**, TTL **`server.metrics.cache-ttl-seconds`**).
-3. **Coarse-by-room mode** (**`server.metrics.cache-coarse-by-room=true`**) to shrink Redis key cardinality for wide dashboards.
+**Key classes.** `PresenceRegistry`, `RoomManager`, `MessageConsumer.flushBroadcast()`, `server.broadcast.targeted`, `consumer.broadcast.targeted`.
 
-**Tradeoffs.** Read paths may see **replication lag** on a true RDS replica; analytics are **stale-OK** by design. Cache invalidation runs on **scheduled MV refresh** and explicit refresh paths (HTTP refresh is **disabled** in `k8s/server.yaml` via **`SERVER_METRICS_ALLOW_HTTP_MV_REFRESH=false`** to prevent accidental load through a public ALB).
-
-### 3.2 Implementation details
-
-- **Code:** `MetricsReadReplicaConfiguration`, `MetricsService` (**`jdbcWrite`** vs **`jdbcRead`**), `MetricsResponseRedisCache`, `MaterializedViewRefreshScheduler`.
-- **Local stack:** PgBouncer **6432** (write) / **6433** (read pool) in `database/docker-compose.yml`; properties point **`read-replica.jdbc-url`** at **6433**.
-- **Kubernetes (in-cluster Postgres):** read-replica property **off** (`SERVER_METRICS_READ_REPLICA_ENABLED=false`) unless you introduce a **real** replica endpoint.
-
-### 3.3 Performance impact measurement
-
-**Method.** Hold JMeter mix constant; compare **p95/p99** of **`/metrics`** samples (or aggregate) with read-path isolation **off** vs **on** (same hardware). Optionally raise **`/metrics`** share temporarily to stress the read path.
-
-**Example comparison table (replace with your numbers):**
-
-| Metric | Single DB URL for reads | Read pool / replica JDBC + cache | Δ |
-|--------|-------------------------|-------------------------------------|---|
-| `/metrics` p95 (ms) | *fill* | *fill* | *%* |
-| `/metrics` p99 (ms) | *fill* | *fill* | *%* |
-| Primary DB active connections | *fill* | *fill* | *%* |
+**Performance impact.** Reduces broker fan-out amplification — affects RabbitMQ I/O and network traffic, not HTTP latency; §4 JMeter baseline will not reflect this delta. Estimated prior †: four-node Assignment 2 experiment — every broadcast hit all 4 nodes. Targeted broadcast reduces per-message broker deliveries by ~50–75% (1–2 active servers per room vs 4 total), directly addressing the gp2 EBS I/O bottleneck identified in those results.
 
 ---
 
-## 4. Future Optimizations (5 points)
+### 2.3 Late ACK and Queue Overflow Policy — *Molly*
 
-| Idea | Expected impact | Implementation complexity |
-|------|-----------------|---------------------------|
-| **1. RDS read replica + PgBouncer** | Lower **`/metrics`** latency and primary CPU; production-grade lag-aware analytics | **Medium** (Terraform, SG rules, JDBC secrets, failover playbook) |
-| **2. RabbitMQ on EC2 with gp3** (or **Amazon MQ**) | Removes **gp2 I/O credit** ceilings; managed option adds HA options | **Low–Medium** (gp3 in Terraform; MQ is higher cost) |
-| **3. Quorum queues / clustered Rabbit** | HA and higher sustained throughput at multi-node broker cost | **High** (cluster ops, queue migrations) |
-| **4. Consumer HPA on custom metrics** (queue depth, lag) | Elastic capacity for hot rooms without over-provisioning | **High** (metrics adapter / KEDA-style) |
-| **5. Tiered MV refresh** (per-MV cron, staggered windows) | Smoother I/O; fewer spikes than one global refresh | **Medium** (scheduler refactor) |
+**Motivation.** Two reliability gaps: (1) consumer ACKed before DB write — crash between the two silently lost the message; (2) drop-head + 5,000 ms TTL silently discarded overflow messages with no publisher signal.
 
----
+**What changed.**
+- *Late ACK.* `basicAck` called per `DeliveryUnit` only after `batchUpsert` commits, from the `db-writer` thread. Failed DB write → message stays unacked, RabbitMQ redelivers. `stageBroadcast` in the same flush — broadcast never precedes persist.
+- *Reject-publish.* TTL removed. Overflow → `reject-publish`: broker NACKs when queue hits 1,000; `server-v2` returns `SERVER_BUSY` instead of `QUEUED`; client re-queues via `offerFirst()`.
+- *Publisher confirms (supporting).* `spring.rabbitmq.publisher-confirm-type=correlated`; `QUEUED` sent only after `MessagePublisher.flushAndConfirmRooms` receives broker confirm.
 
-## 5. Performance Metrics (10 points)
+**Tradeoffs.** Late ACK adds one DB round-trip per flush — negligible at batch=1,000 / 100 ms. Consumer restart redelivers all unacked messages — mitigated by §2.1 Redis dedup.
 
-### 5.1 Test methodology
+**Key classes / config.** `MessageConsumer.flushToDb()`, `MessagePublisher.flushAndConfirmRooms`, `database/docker-compose.yml` (`x-overflow: reject-publish`, no `x-message-ttl`).
 
-- **Tool:** Apache JMeter **non-GUI** (`jmeter -n -t … -l … -e -o …`).
-- **Plans:** **`assignment-baseline-100k-5min.jmx`** (≈1000 threads, **100k** HTTP samples, **70%** **`GET /health`**, **30%** **`GET /metrics`** without `refreshMaterializedViews`); **`assignment-stress-30min.jmx`** for longer stress (500 threads, duration + throughput timers).
-- **Mapping:** Rubric “writes” are approximated by heavy **`/metrics`** reads; true chat **writes** are **WebSocket** (optional WebSocket plugin plan in `load-tests/jmeter/README.md`).
-- **Hygiene:** Empty **`.jtl`** and **report `-o` directory** before each run; on Kubernetes, do not enable **`refreshMaterializedViews`** on **`/metrics`** (returns **403** when **`allow-http-mv-refresh=false`**).
-
-### 5.2 Results presentation (baseline vs optimized)
-
-**Baseline (representative run — replace with your JTL/HTML):**
-
-| Measure | Value |
-|---------|--------|
-| Total samples | 100,000 |
-| Wall time | ~61 s (environment-dependent) |
-| Throughput | ~1,634 req/s |
-| Error rate | 0% |
-
-**Optimized (fill after second configuration):**
-
-| Measure | Value |
-|---------|--------|
-| Total samples | 100,000 |
-| Throughput | *TBD* |
-| p95 / p99 | *TBD* |
-| Error rate | *TBD* |
-
-**Improvement summary (example formula):**  
-`Improvement % = (Baseline − Optimized) / Baseline × 100%` for latency (lower is better); for throughput invert the ratio.
-
-### 5.3 Resource utilization
-
-Include **screenshots** (main text or appendix): **CPU / memory** for **`server-v2`**, **`consumer-v3`**, and **host or pod**; **database** connections or RDS metrics; **RabbitMQ** queue depth if available. State clearly **which environment** (local Docker vs EKS).
-
-### 5.4 Bottleneck analysis
-
-- **Ingress / publish confirms:** Room queue **max-length** and **reject-publish** cause **`SERVER_BUSY`**—correct backpressure, not a client retry storm without limits.
-- **Broker disk:** Historical **`client_part2`** tests hit **gp2** limits; **gp3** or managed MQ is the infrastructure mitigation.
-- **`/metrics`:** Primary DB and MV refresh—mitigated by **read path isolation**, **cache**, and **disabling HTTP MV refresh** on public endpoints.
+**Performance impact.** Reliability and failure-path changes; no steady-state JMeter delta expected. Estimated prior †: drop-head + TTL would have silently discarded messages during the Assignment 2 four-node EBS throttle event — the 100% success rate in the final baseline is partly attributable to this change.
 
 ---
 
-## 6. File Format Checklist
+### 2.4 PostgreSQL Persistence, Batch Tuning, and RDS Read Replica — *Yifan*
 
-- [ ] **Single PDF** with all sections above (this report exported).
-- [ ] **≤ 8 pages** for core content; move extra JMeter HTML screenshots and long tables to **Appendix A**.
-- [ ] **Screenshots:** JMeter dashboard summary + at least one resource monitor view.
-- [ ] **Academic honesty:** All numbers labeled **measured** vs **illustrative**; replace *TBD* / *e.g.* with your actual tables before submission.
+**Motivation.** Assignment 2 had no persistence. Three problems followed: per-message writes saturate connection pools; consumer writes and `/metrics` reads compete on the same instance; EC2 self-hosted Postgres has no managed failover, backups, or replica.
+
+**What changed.**
+- *Persistence.* `consumer-v3` persists via `INSERT INTO messages … ON CONFLICT DO NOTHING` (batched). Schema: `database/01_schema.sql`; indexes in `database/02_indexes.sql` cover all Core Query patterns: `(room_id, timestamp_utc)`, `(user_id, timestamp_utc)`, `(timestamp_utc, user_id)`, `(user_id, room_id, timestamp_utc DESC)`, `(room_id)`.
+- *Batch tuning.* `consumer.batch-size` + `consumer.flush-interval-ms` control cadence. `rewriteBatchedInserts=true` converts driver batches to multi-row `INSERT`s. `consumer.max-db-write-queue` applies backpressure. Optimal: **batch=1,000, flush=100 ms** (from `batch_optimization.csv`, documented in `PerformanceReport.md`).
+- *RDS + read replica.* `server.metrics.read-replica.enabled=true` routes `MetricsService` SELECTs to the replica JDBC URL; `REFRESH MATERIALIZED VIEW` stays on primary. PgBouncer: write pool (6432) / read pool (6433).
+
+**Tradeoffs.** Batch buffering increases time-to-persist — durability covered by Late ACK (§2.3). Replica lag acceptable for analytics. RDS adds cost but removes EC2 ops burden.
+
+**Key classes / config.** `MessagePersistenceService.batchUpsert()`, `MetricsReadReplicaConfiguration`, `consumer.batch-size`, `consumer.flush-interval-ms`, `server.metrics.read-replica.enabled`.
+
+**Performance impact.** Primary evidence: `batch_optimization.csv` (batch×flush throughput matrix) + `PerformanceReport.md`. RDS benefit is operational and architectural — CloudWatch `DatabaseConnections`, `ReadIOPS`, `WriteIOPS`, `ReplicaLag` support the read/write separation story.
+
+## 3. Future Optimizations (5 points)
+
+### 3.1 AWS Academy / Vocareum constraints
+
+| Capability | Limitation | We used |
+|------------|------------|---------|
+| **EKS** | Often unavailable / disabled for labs | **EC2 + ALB + Terraform** (`enable_eks = false`) |
+| **ASG + S3 bootstrap** | Often blocked (IAM create role) | **Fixed EC2**, **`deploy-ec2.ps1`** (`enable_asg_s3_app_tier = false`) |
+
+Measured results assume this **EC2 path**; full EKS/ASG patterns need a non-Academy account.
+
+### 3.2 Kubernetes / EKS as design-only
+
+Repo **may** include **`k8s/`** manifests as reference—we **did not run EKS** for this assignment.
+
+### 3.3 Additional ideas
+
+| Idea | Impact | Effort |
+|------|--------|--------|
+| EKS + ALB Ingress | Rolling deploys, no SSH releases | High (blocked in typical Academy) |
+| KEDA/HPA on queue depth | Scale consumers with load | High |
+| Helm/operators for Redis/RabbitMQ | Day-2 HA | Medium–High |
+| Tiered MV refresh | Smaller refresh spikes | Medium |
 
 ---
 
+## 4. Performance Metrics (10 points)
+
+### 4.1 Test methodology
+
+**JMeter non-GUI** (`jmeter -n -t … -l … -e -o …`). **Plans:** **`assignment-baseline-100k-5min.jmx`** (~1000 threads, 100k samples, 70% `/health`, 30% `/metrics`); **`assignment-stress-30min.jmx`** (~30 min, throughput-capped ~**500k** samples). **Stress** load from **same-region EC2** (`enable_jmeter_ec2`) → ALB (avoids laptop TCP issues). Rubric “writes” ≈ heavy **`/metrics`**; real chat writes are **WebSocket** (see `load-tests/jmeter/README.md`). Clear **`.jtl`** / report dir before runs; do not enable **`refreshMaterializedViews`** on public **`/metrics`** (403 when disabled).
+
+### 4.2 Results
+
+**Note on stress test setup.** The stress JMeter client was co-located on an EC2 instance in the same region as the ALB, rather than run locally. This eliminates client-side network jitter as a variable and ensures the measured latency reflects server-side processing time under sustained load — the ~3 ms mean is consistent with intra-region EC2 round-trip overhead rather than cross-continent latency.
+
+**Configuration:** Redis enabled on server and consumer (ElastiCache, `SERVER_REDIS_ENABLED` / `CONSUMER_REDIS_ENABLED`).
+
+| | Baseline (`assignment-baseline-100k-5min`) | Stress (`assignment-stress-30min`) |
+|---|---|---|
+| JTL | `assignment-baseline-100k-5min-alb-20260419-141613.jtl` | `stress-ec2-run.jtl` |
+| Samples | 100,000 | 500,554 |
+| Duration | ~278 s | ~32 min |
+| Throughput | ~360 req/s | ~261 req/s |
+| Mean latency | ~85 ms | ~3 ms |
+| p95 / p99 | 111 / 167 ms | 5 / 8 ms |
+| Errors | 0% | 0% |
+
+[JMeter HTML Report - Baseline](./load-tests/jmeter/results/assignment-baseline-100k-5min-alb-20260419-141613-report/index.html)
+
+[JMeter HTML Report - Stress](./load-tests/jmeter/results/stress-ec2-report/index.html)
+
+Stress **latency is not comparable** to baseline: throughput **caps** spread load over 30 min; baseline finishes 100k as fast as the SUT allows—different test goals.
+
+**Optimized / contrast runs** (e.g. Redis off, read-replica only): use a **second** JTL only when you run a controlled A/B; otherwise cite §2 evidence and CloudWatch. The table above is already the **Redis-on** baseline.
+
+**Improvement % (latency):** use only when you have a **paired** optimized run: `(Baseline − Optimized) / Baseline × 100%`; invert for throughput.
+
+### 4.3 Resource utilization
+
+**Minimum:** **CPU/memory** (server, consumer) and **DB/RDS** (connections or CloudWatch). 
+Fig. 1: RDS read replica CPU utilization during baseline run
+![RDS CPU Utilization](./load-tests/results/Replica.png)
+Fig. 2: ElastiCache CPU utilization during baseline run
+![Cache CPU Utilization](./load-tests/results/cache_utilization.png)
+### 4.4 Bottleneck analysis
+
+- **Publish confirms / queue limits** → **`SERVER_BUSY`** (intentional backpressure).
+- **Broker disk** — historical **gp2** limits; prefer **gp3** or managed MQ.
+- **Consumer → Postgres** — sustained insert rate; mitigated by **§2.3** (batched upserts + **`rewriteBatchedInserts`**).
+- **`/metrics`** — primary + MV refresh; mitigated by **§2.2** (read path, cache, no public MV refresh).
+
+---
 ## Appendix A — Optional Material
 
-- Full JMeter HTML report paths and command lines used.
-- `terraform output` redacted summary (cluster name, no secrets).
-- Additional **`kubectl top pods`** / CloudWatch graphs.
+- Baseline JTL: `load-tests/jmeter/results/assignment-baseline-100k-5min-alb-20260419-141613.jtl` — `jmeter -g <jtl> -o <dir>`.
+- Stress: `load-tests/jmeter/results/stress-ec2-run.jtl`, `load-tests/jmeter/results/stress-ec2-report/`.
+- Redacted `terraform output`; **CloudWatch** (or RDS/ElastiCache/ALB) **PNG/PDF exports** for the metrics in §2’s table—**figure captions** in the main text or here (Fig. A1: …).
 
+- [JMeter HTML Report - Stress](./load-tests/jmeter/results/stress-ec2-report/index.html)
+
+- [JMeter HTML Report - Baseline](./load-tests/jmeter/results/assignment-baseline-100k-5min-alb-20260419-141613-report/index.html)
 ---

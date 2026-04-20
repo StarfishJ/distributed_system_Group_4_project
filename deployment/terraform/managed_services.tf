@@ -94,9 +94,24 @@ resource "aws_db_instance" "postgres" {
   publicly_accessible      = false
   skip_final_snapshot      = true
   delete_automated_backups = true
-  backup_retention_period  = 0
+  backup_retention_period  = var.use_rds_read_replica ? 1 : 0
 
   tags = { Name = "${var.project_name}-rds" }
+}
+
+resource "aws_db_instance" "postgres_read_replica" {
+  count = var.use_rds_postgres && var.use_rds_read_replica ? 1 : 0
+
+  identifier               = "${var.project_name}-pg-ro"
+  replicate_source_db      = aws_db_instance.postgres[0].arn
+  instance_class           = var.rds_read_replica_instance_class != null ? var.rds_read_replica_instance_class : var.rds_instance_class
+  db_subnet_group_name     = aws_db_subnet_group.main[0].name
+  vpc_security_group_ids   = [aws_security_group.rds[0].id]
+  publicly_accessible      = false
+  skip_final_snapshot      = true
+  delete_automated_backups = true
+
+  tags = { Name = "${var.project_name}-rds-ro" }
 }
 
 resource "aws_mq_broker" "rabbitmq" {

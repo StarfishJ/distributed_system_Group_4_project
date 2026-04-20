@@ -11,7 +11,7 @@
       <!-- 700 * 100 = 70,000 (~70%) -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="01_Read_70pct_GET_health" enabled="true">
         <stringProp name="ThreadGroup.num_threads">${__P(read_threads,700)}</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,60)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,270)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
@@ -31,8 +31,8 @@
           <stringProp name="HTTPSampler.contentEncoding"></stringProp>
           <stringProp name="HTTPSampler.path"></stringProp>
           <stringProp name="HTTPSampler.concurrentPool">6</stringProp>
-          <stringProp name="HTTPSampler.connect_timeout">15000</stringProp>
-          <stringProp name="HTTPSampler.response_timeout">15000</stringProp>
+          <stringProp name="HTTPSampler.connect_timeout">60000</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">120000</stringProp>
         </ConfigTestElement>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET /health" enabled="true">
@@ -62,7 +62,7 @@
       <!-- 300 * 100 = 30,000 (~30%) -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="02_Heavy_30pct_GET_metrics" enabled="true">
         <stringProp name="ThreadGroup.num_threads">${__P(write_threads,300)}</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,60)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,270)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">

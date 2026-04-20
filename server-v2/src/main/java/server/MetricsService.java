@@ -1,6 +1,9 @@
 package server;
 
 import java.sql.Timestamp;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -8,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,6 +20,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+
+import javax.sql.DataSource;
 
 import server.redis.MetricsResponseRedisCache;
 import server.redis.MetricsResponseRedisCache.CoarseRedisPayload;
@@ -36,6 +43,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
  */
 @Service
 public class MetricsService {
+
+    private static final Logger log = LoggerFactory.getLogger(MetricsService.class);
 
     /** Primary DB: {@code REFRESH MATERIALIZED VIEW} only (replicas cannot run refresh). */
     private final JdbcTemplate jdbcWrite;
@@ -83,10 +92,22 @@ public class MetricsService {
     public Map<String, Object> getAllMetrics(String roomId, String userId, int topN,
             String startTimeIso, String endTimeIso, boolean refreshMaterializedViews) {
         if (refreshMaterializedViews) {
-            refreshMaterializedViewsInternal();
-            metricsResponseCache.invalidateAll();
-            roomCoarseCache.invalidateAll();
-            redisMetrics.ifPresent(MetricsResponseRedisCache::invalidateAll);
+            boolean refreshed = false;
+            try {
+                refreshMaterializedViewsInternal();
+                refreshed = true;
+            } catch (RuntimeException e) {
+                if (isReadOnlyRefreshError(e)) {
+                    log.warn("Skipping MV refresh due to read-only transaction context: {}", e.getMessage());
+                } else {
+                    throw e;
+                }
+            }
+            if (refreshed) {
+                metricsResponseCache.invalidateAll();
+                roomCoarseCache.invalidateAll();
+                redisMetrics.ifPresent(MetricsResponseRedisCache::invalidateAll);
+            }
         }
         if (cacheCoarseByRoom) {
             return getAllMetricsCoarseByRoom(roomId, userId, topN, startTimeIso, endTimeIso);
@@ -152,6 +173,21 @@ public class MetricsService {
         }
     }
 
+    private static boolean isReadOnlyRefreshError(Throwable t) {
+        Throwable cur = t;
+        while (cur != null) {
+            if (cur instanceof SQLException sqlEx && "25006".equals(sqlEx.getSQLState())) {
+                return true;
+            }
+            String msg = cur.getMessage();
+            if (msg != null && msg.toLowerCase().contains("read-only transaction")) {
+                return true;
+            }
+            cur = cur.getCause();
+        }
+        return false;
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> copyMetricsForResponse(Map<String, Object> src) {
         Map<String, Object> out = new HashMap<>(src);
@@ -215,14 +251,27 @@ public class MetricsService {
 
     /** Refreshes all assignment MVs so analytics and Core 4 match {@code messages}. */
     private void refreshMaterializedViewsInternal() {
-        try {
-            jdbcWrite.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_user_rooms");
-        } catch (Exception e) {
-            jdbcWrite.execute("REFRESH MATERIALIZED VIEW mv_user_rooms");
+        DataSource dataSource = jdbcWrite.getDataSource();
+        if (dataSource == null) {
+            throw new IllegalStateException("Primary DataSource is not available for MV refresh");
         }
-        jdbcWrite.execute("REFRESH MATERIALIZED VIEW mv_messages_per_minute");
-        jdbcWrite.execute("REFRESH MATERIALIZED VIEW mv_user_activity");
-        jdbcWrite.execute("REFRESH MATERIALIZED VIEW mv_room_activity");
+        try (Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement()) {
+            // Use an independent connection to avoid inheriting any read-only transaction context.
+            connection.setReadOnly(false);
+            connection.setAutoCommit(true);
+            statement.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE");
+            try {
+                statement.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_user_rooms");
+            } catch (Exception e) {
+                statement.execute("REFRESH MATERIALIZED VIEW mv_user_rooms");
+            }
+            statement.execute("REFRESH MATERIALIZED VIEW mv_messages_per_minute");
+            statement.execute("REFRESH MATERIALIZED VIEW mv_user_activity");
+            statement.execute("REFRESH MATERIALIZED VIEW mv_room_activity");
+        } catch (SQLException e) {
+            throw new RuntimeException("Materialized view refresh failed", e);
+        }
     }
 
     private Map<String, Object> computeAllMetrics(String roomId, String userId, int topN,

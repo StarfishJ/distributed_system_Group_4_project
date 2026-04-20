@@ -42,20 +42,84 @@ java -jar client/client_part2/target/chat-client-part2-0.0.1-SNAPSHOT.jar http:/
 
 ## Load Test Suite (Part 4)
 
-| Test        | Messages | Duration        | Purpose                    |
-|-------------|----------|-----------------|----------------------------|
-| Baseline    | 500,000  | To completion   | Establish baseline metrics |
-| Stress       | 1,000,000| To completion   | Find bottlenecks           |
-| Endurance   | Sustained| ~30 min         | 80% max throughput, check degradation |
+The assignment requires two main JMeter scenarios plus optional endurance verification.
 
-### Commands
+### 1) Baseline Performance Test
+
+| Item | Target |
+|------|--------|
+| Concurrent users | 1000 |
+| API calls | 100,000 |
+| Duration | 5 minutes |
+| Operation mix | 70% reads / 30% writes |
+| Required metrics | Average response time, p95, p99, throughput, error rate |
+
+### 2) Stress Test
+
+| Item | Target |
+|------|--------|
+| Concurrent users | 500 |
+| API calls | 200,000–500,000 |
+| Duration | 30 minutes |
+| Operation mix | Mixed read/write operations |
+| Required metrics | System breaking point, CPU, memory, database connections, throughput, error rate |
+
+### 3) Endurance Test
+
+| Item | Target |
+|------|--------|
+| Duration | ~30 minutes |
+| Throughput | Around 80% of maximum sustainable throughput |
+| Purpose | Check degradation over time |
+
+### Recommended commands
 
 ```powershell
-# Baseline
-java -jar client/client_part2/target/chat-client-part2-0.0.1-SNAPSHOT.jar http://localhost:8080 500000
+# Baseline (recommended JMeter plan)
+.\load-tests\jmeter\run-http-via-alb.ps1 -TestPlan "assignment-baseline-1000u-100k-5min-rw7030.jmx"
 
-# Stress
-java -jar client/client_part2/target/chat-client-part2-0.0.1-SNAPSHOT.jar http://localhost:8080 1000000
+# Stress (recommended JMeter plan)
+.\load-tests\jmeter\run-http-via-alb.ps1 -TestPlan "assignment-stress-500u-30min-rw-mixed.jmx"
 
-# Endurance: run for ~30 min at target rate (adjust message count to achieve ~80% of max throughput)
+# Optional endurance run
+java -jar client/client_part2/target/chat-client-part2-0.0.1-SNAPSHOT.jar http://localhost:8080 --endurance-minutes=30 --results-tag endurance-30m
 ```
+
+### Metrics to collect for each run
+
+- Average response time
+- p95 and p99 response times
+- Throughput (requests/second)
+- Error rate percentage
+- CPU utilization
+- Memory utilization
+- Database connections
+
+### Notes
+
+- The JMeter HTTP plans in `load-tests/jmeter/` approximate the assignment mix by using `/health` as the light read path and `/metrics` as the heavier read/analytics path.
+- If you want literal chat write traffic, use a WebSocket-based load plan instead of HTTP-only samplers.
+
+### Pre-run improvement checklist (recommended order)
+
+1. **Clarify test scope**
+   - State explicitly that the submitted baseline/stress runs use **HTTP JMeter**.
+   - Note that `/health` is the light read path and `/metrics` is the heavier read/analytics path.
+   - Add a short sentence in the report that this is an **approximation** of the assignment’s read/write mix, while the real chat write path is WebSocket-based.
+
+2. **Freeze consumer batch settings**
+   - Pick one final `consumer.batch-size` and `consumer.flush-interval-ms` combination from the optimization results.
+   - Use the same values for all final baseline/stress/endurance runs so the results are comparable.
+
+3. **Reduce avoidable metrics jitter**
+   - Keep `refreshMaterializedViews=true` out of the main benchmark path.
+   - Use metrics refresh only for a pre-run validation snapshot or a post-run collection step.
+
+4. **Use targeted broadcast for multi-instance runs**
+   - If you run more than one `server-v2` instance, enable the targeted broadcast path so you do not fan out to every node unnecessarily.
+   - Keep fan-out as the fallback path only when Redis/presence is unavailable.
+
+5. **Collect resource utilization evidence**
+   - Record CPU, memory, and database connection counts during each scenario.
+   - Also capture RabbitMQ queue depth if available.
+   - Save the screenshots or logs with matching names: `baseline`, `stress`, and `endurance`.

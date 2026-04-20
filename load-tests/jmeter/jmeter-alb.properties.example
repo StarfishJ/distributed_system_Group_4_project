@@ -1,0 +1,7 @@
+# 复制为 jmeter-alb.properties（勿提交含真实 DNS 的文件若团队有规范）
+# HTTP 经 ALB：端口必须是 80（ALB 监听 80，再转到实例 8080）
+#
+# host=cs6650-chat-alb-xxxx.us-east-1.elb.amazonaws.com
+host=REPLACE_WITH_TERRAFORM_ALB_DNS
+port=80
+protocol=http

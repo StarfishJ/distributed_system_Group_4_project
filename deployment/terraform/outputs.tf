@@ -1,34 +1,11 @@
+output "aws_region" {
+  description = "Region used by this stack (for AWS CLI in deploy-ec2.ps1)"
+  value       = var.aws_region
+}
+
 output "alb_dns_name" {
   description = "EC2 path: point load test client here (HTTP 80). Null when using EKS (use Ingress / LB Controller instead)."
   value       = local.create_app_ec2 && var.enable_alb ? aws_lb.main[0].dns_name : null
-}
-
-# --- EKS ---
-
-output "eks_cluster_name" {
-  description = "EKS cluster name (kubectl config use-context)"
-  value       = var.enable_eks ? module.eks[0].cluster_name : null
-}
-
-output "eks_cluster_endpoint" {
-  description = "Kubernetes API endpoint"
-  value       = var.enable_eks ? module.eks[0].cluster_endpoint : null
-}
-
-output "eks_cluster_certificate_authority_data" {
-  description = "For kubeconfig / CI"
-  value       = var.enable_eks ? module.eks[0].cluster_certificate_authority_data : null
-  sensitive   = true
-}
-
-output "eks_node_security_group_id" {
-  description = "Attached to worker nodes; use in SG rules for ElastiCache / extra data stores"
-  value       = var.enable_eks ? module.eks[0].node_security_group_id : null
-}
-
-output "configure_kubectl" {
-  description = "AWS CLI v2: update kubeconfig after apply"
-  value       = var.enable_eks ? "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks[0].cluster_name}" : null
 }
 
 # --- RabbitMQ: Amazon MQ OR self-hosted EC2 ---
@@ -49,12 +26,12 @@ output "rabbitmq_amqp_console_url" {
 }
 
 output "rabbitmq_username" {
-  value = var.use_amazon_mq ? var.amazon_mq_username : "guest"
+  value = var.use_amazon_mq ? var.amazon_mq_username : "chatmq"
 }
 
 output "rabbitmq_password" {
   description = "Amazon MQ password (sensitive). Self-hosted EC2: null (configure RabbitMQ yourself)."
-  value       = length(random_password.mq) > 0 ? random_password.mq[0].result : null
+  value       = length(random_password.mq) > 0 ? random_password.mq[0].result : "chatmq"
   sensitive   = true
 }
 
@@ -83,6 +60,16 @@ output "postgres_address" {
   value       = var.use_rds_postgres ? aws_db_instance.postgres[0].address : (length(aws_instance.postgres) > 0 ? aws_instance.postgres[0].private_ip : null)
 }
 
+output "postgres_read_replica_address" {
+  description = "RDS read replica host for read-only queries (null when disabled or non-RDS mode)"
+  value       = var.use_rds_postgres && length(aws_db_instance.postgres_read_replica) > 0 ? aws_db_instance.postgres_read_replica[0].address : null
+}
+
+output "postgres_read_replica_jdbc_url" {
+  description = "JDBC URL for RDS read replica (null when disabled or non-RDS mode)"
+  value       = var.use_rds_postgres && length(aws_db_instance.postgres_read_replica) > 0 ? "jdbc:postgresql://${aws_db_instance.postgres_read_replica[0].address}:5432/${var.rds_database_name}" : null
+}
+
 output "postgres_username" {
   value = var.use_rds_postgres ? var.rds_master_username : "chat"
 }
@@ -101,23 +88,88 @@ output "postgres_private_ip" {
   value = var.use_rds_postgres ? null : (length(aws_instance.postgres) > 0 ? aws_instance.postgres[0].private_ip : null)
 }
 
-# --- App EC2 ---
+# --- Redis: ElastiCache OR Docker on EC2 (see deploy-ec2.ps1) ---
+
+output "redis_elasticache_primary_address" {
+  description = "ElastiCache primary endpoint hostname; null when use_elasticache_redis=false or enable_eks=true"
+  value       = length(aws_elasticache_replication_group.app_redis) > 0 ? aws_elasticache_replication_group.app_redis[0].primary_endpoint_address : null
+}
+
+output "redis_elasticache_port" {
+  description = "Redis port (6379 unless changed in elasticache.tf)"
+  value       = length(aws_elasticache_replication_group.app_redis) > 0 ? aws_elasticache_replication_group.app_redis[0].port : null
+}
+
+# --- App tier: ASG + S3 (see asg_app.tf) ---
+
+output "app_artifacts_bucket" {
+  description = "S3 bucket for server-v2.jar / server.env / consumer-v3.jar / consumer.env"
+  value       = length(aws_s3_bucket.app_artifacts) > 0 ? aws_s3_bucket.app_artifacts[0].id : null
+}
+
+output "app_artifacts_s3_prefix" {
+  description = "Key prefix under the bucket (no leading slash)"
+  value       = local.create_asg_s3_app ? local.app_artifacts_s3_prefix : null
+}
+
+output "server_autoscaling_group_name" {
+  description = "Server ASG name (instance refresh after S3 upload)"
+  value       = length(aws_autoscaling_group.server) > 0 ? aws_autoscaling_group.server[0].name : null
+}
+
+output "consumer_autoscaling_group_name" {
+  description = "Consumer ASG name"
+  value       = length(aws_autoscaling_group.consumer) > 0 ? aws_autoscaling_group.consumer[0].name : null
+}
 
 output "server_public_ips" {
-  description = "EC2 server-v2 only (empty when enable_eks = true)"
-  value       = aws_instance.server[*].public_ip
+  description = "Public IPs of server-v2 instances (EC2 or ASG)"
+  value = !local.create_app_ec2 ? [] : (
+    local.create_asg_s3_app ? sort(data.aws_instances.server_asg[0].public_ips) : sort(aws_instance.server[*].public_ip)
+  )
 }
 
 output "server_private_ips" {
-  value = aws_instance.server[*].private_ip
+  description = "Private IPs of server-v2 instances"
+  value = !local.create_app_ec2 ? [] : (
+    local.create_asg_s3_app ? sort(data.aws_instances.server_asg[0].private_ips) : sort(aws_instance.server[*].private_ip)
+  )
 }
 
 output "consumer_public_ip" {
-  value = length(aws_instance.consumer) > 0 ? aws_instance.consumer[0].public_ip : null
+  description = "First consumer public IP (compat)"
+  value = !local.create_app_ec2 ? null : (
+    local.create_asg_s3_app ? (
+      length(data.aws_instances.consumer_asg[0].public_ips) > 0 ? data.aws_instances.consumer_asg[0].public_ips[0] : null
+      ) : (
+      length(aws_instance.consumer) > 0 ? aws_instance.consumer[0].public_ip : null
+    )
+  )
 }
 
 output "consumer_private_ip" {
-  value = length(aws_instance.consumer) > 0 ? aws_instance.consumer[0].private_ip : null
+  description = "First consumer private IP (compat)"
+  value = !local.create_app_ec2 ? null : (
+    local.create_asg_s3_app ? (
+      length(data.aws_instances.consumer_asg[0].private_ips) > 0 ? data.aws_instances.consumer_asg[0].private_ips[0] : null
+      ) : (
+      length(aws_instance.consumer) > 0 ? aws_instance.consumer[0].private_ip : null
+    )
+  )
+}
+
+output "consumer_public_ips" {
+  description = "Public IPs of consumer-v3 instances"
+  value = !local.create_app_ec2 ? [] : (
+    local.create_asg_s3_app ? sort(data.aws_instances.consumer_asg[0].public_ips) : sort(aws_instance.consumer[*].public_ip)
+  )
+}
+
+output "consumer_private_ips" {
+  description = "Private IPs of consumer-v3 instances"
+  value = !local.create_app_ec2 ? [] : (
+    local.create_asg_s3_app ? sort(data.aws_instances.consumer_asg[0].private_ips) : sort(aws_instance.consumer[*].private_ip)
+  )
 }
 
 output "ec2_key_pair_name" {
@@ -127,4 +179,14 @@ output "ec2_key_pair_name" {
 
 output "ssh_hint" {
   value = "ssh -i ~/.ssh/<your-private-key> ec2-user@<public_ip_from_outputs>"
+}
+
+output "jmeter_public_ip" {
+  description = "Public IP of optional JMeter load-generator EC2 (null when enable_jmeter_ec2=false)"
+  value       = length(aws_instance.jmeter) > 0 ? aws_instance.jmeter[0].public_ip : null
+}
+
+output "jmeter_ssh_example" {
+  description = "Example SSH to JMeter host (replace key path)"
+  value       = length(aws_instance.jmeter) > 0 ? "ssh -i ~/.ssh/<your-key>.pem ec2-user@${aws_instance.jmeter[0].public_ip}" : null
 }

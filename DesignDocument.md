@@ -12,9 +12,9 @@ https://github.com/StarfishJ/distributed_system_Group_4_project.git
 | **`consumer-v3/`** | Room-queue consumers, PostgreSQL ingest, broadcast to **`chat.broadcast`** / **`chat.broadcast.topic`**, DLQ replay + dead-letter audit |
 | **`client/client_part2/`** | Load / functional Java client |
 | **`database/`** | **`docker-compose.yml`** — Postgres (`chatdb-pg`), RabbitMQ, Redis, PgBouncer (6432 write / 6433 read), init SQL |
-| **`load-tests/jmeter/`** | JMeter plans (`assignment-baseline-100k-5min.jmx`, `assignment-stress-30min.jmx`) + **`README.md`** |
-| **`k8s/`** | Kubernetes manifests (server, consumer, Redis, Postgres, RabbitMQ, ingress, secrets, Kustomization) |
-| **`deployment/terraform/`** | AWS / EKS–related Terraform (see that folder’s README) |
+| **`load-tests/jmeter/`** | JMeter plans (e.g., `assignment-baseline-100k-5min.jmx`, `assignment-stress-30min.jmx`) + **`README.md`** |
+| **`deployment/terraform/`** | AWS EC2 / ASG–related Terraform scripts (see that folder’s README) |
+| **`k8s/`** | *(Reference only)* Kubernetes manifests (not included in final submission; see Future Roadmap) |
 
 ## 1. System Architecture
 Our architecture utilizes a decoupled, event-driven pattern to achieve horizontal scalability. Servers handle WebSocket I/O via Netty, while a standalone Consumer layer manages global broadcast logic via RabbitMQ.
@@ -32,7 +32,7 @@ graph TD
 ```
 
 ### [Diagram 2: Latest end-to-end architecture — Assignment 3]
-Below is the **current** view: horizontal **server-v2** instances behind a load balancer (or **Ingress** in Kubernetes), **partitioned room queues** on RabbitMQ, **consumer** for ordered consume + **PostgreSQL** persistence, and **two optional broadcast paths**: **(A)** default **fan-out** `chat.broadcast` (simple, **O(servers)** copies per message); **(B)** **targeted** **`chat.broadcast.topic`** using **Redis presence** so the Consumer publishes only to routing keys **`srv.{suffix}`** for servers that actually have that room open (**see §3 “Broadcast evolution”**). **Redis** is the **shared** store for **dedup**, **presence**, and optional **`/metrics`** cache.
+Below is the **current** view: horizontal **server-v2** instances behind a load balancer (ALB or ASG on EC2), **partitioned room queues** on RabbitMQ, **consumer** for ordered consume + **PostgreSQL** persistence (RDS), and **two optional broadcast paths**: **(A)** default **fan-out** `chat.broadcast` (simple, **O(servers)** copies per message); **(B)** **targeted** **`chat.broadcast.topic`** using **Redis presence** so the Consumer publishes only to routing keys **`srv.{suffix}`** for servers that actually have that room open (**see §3 “Broadcast evolution”**). **Redis** (ElastiCache) is the **shared** store for **dedup**, **presence**, and optional **`/metrics`** cache.
 
 ```mermaid
 flowchart TB
@@ -112,14 +112,14 @@ flowchart TB
 
 **Legend — main paths**
 
-| Path | Role |
+| Layer | Role |
 |------|------|
 | **Client → LB → server-v2** | WebSocket chat; `GET /health` for ALB checks. |
 | **server → Topic → room.1…20** | Ingress sharding: routing key `room.{k}` with `k = Math.abs(roomId.hashCode()) % 20 + 1` (see `MessagePublisher`); payload keeps the real `roomId` string. |
 | **Consumer → broadcast** | **Default (`chat.broadcast` fan-out):** every server receives every batch; each node **filters by `roomId`** locally — **O(number of servers)** broker deliveries per message, simple and robust. **Optional (`chat.broadcast.topic` + Redis):** **`presence:room:{roomId}`** → publish only to **`srv.{sanitized-instance-id}`** for members of that set; **empty set → fan-out fallback** (safe cold start). |
 | **Consumer → PostgreSQL** | Durable message writes (Assignment 3). |
-| **Consumer ↔ Redis** | **Optional via config** (`consumer.redis.enabled`; default in **code** is off unless set). **Checked-in local `application.properties`** sets **`consumer.redis.enabled=true`**: persisted markers after DB commit + broadcast **SETNX** — survives **Consumer** restart; reduces **duplicate fan-out** and useless **`batchUpsert`** on redelivery. |
-| **server-v2 ↔ Redis** | **Optional via config** (`server.redis.enabled`). **Checked-in local `application.properties`** sets **`server.redis.enabled=true`**: **Metrics** read-through cache + invalidation (see **Query optimization…**). **Presence:** **`PresenceRegistry`** maintains **`presence:room:{roomId}`** (sanitized instance suffix) on join / last-session leave + heartbeat. With **`consumer.broadcast.targeted=true`** and Redis, **`consumer-v3`** uses **`SMEMBERS`** to route topic broadcast; if targeted mode is off or Redis is unavailable, broadcast uses **fan-out** (`chat.broadcast`) only (or fan-out fallback when presence is empty). |
+| **Consumer ↔ Redis** | **Optional via config** (`consumer.redis.enabled`; default in **code** is off). **Production runs** set **`consumer.redis.enabled=true`**: persisted markers after DB commit + broadcast **SETNX** — survives **Consumer** restart; reduces **duplicate fan-out** and useless **`batchUpsert`** on redelivery. |
+| **server-v2 ↔ Redis** | **Optional via config** (`server.redis.enabled`; default in **code** is off). **Production runs** set **`server.redis.enabled=true`**: **Metrics** read-through cache + invalidation (see **Query optimization…**). **Presence:** **`PresenceRegistry`** maintains **`presence:room:{roomId}`** (sanitized instance suffix) on join / last-session leave + heartbeat. With **`consumer.broadcast.targeted=true`** and Redis, **`consumer-v3`** uses **`SMEMBERS`** to route topic broadcast; if targeted mode is off or Redis is unavailable, broadcast uses **fan-out** (`chat.broadcast`) only (or fan-out fallback when presence is empty). |
 
 ### Database write boundary (verified in code)
 
@@ -310,7 +310,7 @@ This is the **first place we would optimize** when scaling server count:
 
 **Trade-offs (explicit):** presence is **eventually consistent**; you trade a **Redis read** (and multi-publish when several servers share a room) for **much less** useless fan-out when **S** is large and rooms are sparse. **Stable `server.instance-id`** (especially on Kubernetes) keeps **suffix ↔ routing key ↔ queue name** aligned.
 
-**Checked-in local configuration (`application.properties`):** `server.redis.enabled=true`, `server.broadcast.targeted=true`, `consumer.redis.enabled=true`, `consumer.broadcast.targeted=true`, with **one** Redis instance (`database/docker-compose.yml`). For minimal dev without Redis, set those flags to **`false`** and use fan-out broadcast only (see `load-tests/jmeter/README.md` for HTTP-only load tests).
+**Checked-in local configuration (`application.properties`):** `server.redis.enabled=false`, `server.broadcast.targeted=true`, `consumer.redis.enabled=false`, `consumer.broadcast.targeted=true` (defaults). For performance runs / AWS deployment, these are switched to **`true`** via environment variables or property overrides. For minimal dev without Redis, use fan-out broadcast only (see `load-tests/jmeter/README.md` for HTTP-only load tests).
 
 **Production / scale requirement:** With **multiple `server-v2` replicas**, **targeted broadcast must be enabled** (flags + Redis above) so chat fan-out does **not** stay **O(S)** on **`chat.broadcast`** to every pod that will **discard** most messages. **Reducing useless RabbitMQ deliveries and network traffic** is a **first-class** goal alongside correctness; fan-out remains acceptable for **dev/small clusters** or **fallback** when presence is empty.
 
@@ -348,7 +348,7 @@ The stack has **two distinct RabbitMQ legs**. **Do not** mix them when diagnosin
 - **Deduplication**: The Consumer uses a **Caffeine Cache** (LRU) to drop duplicate `UUIDs` that may arise during network retries or RabbitMQ redeliveries.
 - **Graceful Shutdown**: All nodes use Spring's graceful shutdown (30s timeout) to ensure in-flight AMQP ACKs are processed before the process exits.
 
-### Kubernetes deployment (design improvement — operations & scale)
+### Kubernetes deployment (Future Cloud Native Roadmap)
 
 Kubernetes is framed here as an **operational and elasticity** improvement: **how** we run multiple **server-v2** and **consumer-v3** replicas, roll out config, and integrate with the **same** application semantics already described (late ACK, DB-before-broadcast staging, optional **Redis** dedup / **presence** / **targeted** topic broadcast). K8s does **not** replace those guarantees; it standardizes **replica count, health, and upgrades**.
 
@@ -361,7 +361,7 @@ Kubernetes is framed here as an **operational and elasticity** improvement: **ho
 | **Config & secrets** | **ConfigMap** for non-secret tuning; **Secret** for DB, RabbitMQ, Redis passwords. | Keeps **Redis / targeted broadcast** flags consistent across server and consumer fleets. |
 | **Data plane** | **PostgreSQL**, **RabbitMQ**, and **Redis** are usually **managed services** or dedicated clusters **outside** the app Deployment (or via operators), not lost on random pod restart. | Same as running RDS + a dedicated broker today; pods stay stateless except local WebSocket state. |
 
-**Scope boundary (for the grader):** This section describes a **production-style** target topology. **Amazon EKS** is the intended cloud runtime; this repository ships **`k8s/`** manifests and **`deployment/terraform/`** to support that path. **Local grading** typically uses **`database/docker-compose.yml`** (Postgres, RabbitMQ, Redis, PgBouncer) plus JVM runs of **`server-v2`** (port **8080**) and **`consumer-v3`** (port **8081**). A stack check script is **`database/check-stack.ps1`** (use **`-HealthPath /health`** for `server-v2`).
+**Scope boundary (for the grader):** This section describes a **production-style** target topology. While **Amazon EKS** is a future cloud native target, this repository currently focuses on **EC2 / ASG** deployment via **`deployment/terraform/`**. **Local grading** typically uses **`database/docker-compose.yml`** (Postgres, RabbitMQ, Redis, PgBouncer) plus JVM runs of **`server-v2`** (port **8080**) and **`consumer-v3`** (port **8081**). A stack check script is **`database/check-stack.ps1`** (use **`-HealthPath /health`** for `server-v2`).
 
 #### Terraform (AWS infrastructure) vs EKS (Kubernetes workloads)
 
@@ -378,9 +378,9 @@ The table below is **one** consistent AWS layout for the architecture in this do
 
 | Component | Recommended AWS service | Role |
 |-----------|-------------------------|------|
-| **Kubernetes** | **Amazon EKS** | Control plane for **server-v2** and **consumer-v3**. |
-| **server-v2** | **EKS Deployment** or **StatefulSet** (+ Service / Ingress) | Stateless WebSocket edge; config via **ConfigMap** / **Secret**; **`server.instance-id`** must be **stable** for targeted broadcast (see **EKS rollout validation** below). |
-| **consumer-v3** | **EKS Deployment** (one or more, e.g. by **`consumer.rooms`**) | Write-behind consumer; same image, different env for room partitions. |
+| **Compute Context** | **Amazon EC2 (ASG)** | Primary runtime for **server-v2** and **consumer-v3** (Assignment 3). |
+| **server-v2** | **EC2 Instance / ASG** | Stateless WebSocket edge; config via properties/env. |
+| **consumer-v3** | **EC2 Instance / ASG** | Write-behind consumer; same image, different env for room partitions. |
 | **PostgreSQL** | **EC2** (self-managed) *or* **Amazon RDS** | Chat persistence + materialized views; **EC2** matches lab-style full control; **RDS** is the usual managed alternative (not contradictory to this design). |
 | **RabbitMQ** | **EC2** (self-managed) *or* **Amazon MQ** | **`chat.exchange`**, room queues, **`chat.broadcast`** / **`chat.broadcast.topic`**; performance notes in **§4** reference broker **EBS** — typical when the broker runs on **EC2**. |
 | **Redis** | **Amazon ElastiCache** (Redis) | Shared **dedup**, **presence** (`presence:room:*`), optional **`/metrics`** cache — same logical cluster for all app pods. |
@@ -462,11 +462,10 @@ Earlier experiments measured **end-to-end chat message rate** with multiple **`s
 
 #### Instance types (reference AWS layout) vs local dev
 
-**AWS (example — align with `deployment/terraform/` if used):**
+**AWS (example — align with `deployment/terraform/`):**
 
-- **`server-v2`:** EKS **Deployment** / **StatefulSet**; **`t3.medium`**-class nodes; ALB + AWS Load Balancer Controller.
-- **`consumer-v3`:** EKS **Deployment**; **`t3.small`**-class nodes (or shared pool); scale **`consumer.rooms`** across Deployments as needed.
-- **RabbitMQ:** **EC2** `t3.medium` (or `t3.small` for lab) with **gp3** root volume via Terraform **`root_block_device`** (per **§ Performance** broker notes).
+- **`server-v2` / `consumer-v3`:** EC2 **Auto Scaling Groups**; **`t3.medium`**-class nodes; ALB.
+- **RabbitMQ:** **EC2** `t3.medium` (or `t3.small` for lab) with **gp3** root volume via Terraform.
 - **PostgreSQL:** **EC2** or **RDS** `t3.medium` + **PgBouncer**.
 - **Redis:** **ElastiCache** `cache.t3.micro` (or self-hosted in `k8s/redis.yaml` for non-prod).
 
@@ -480,13 +479,13 @@ Earlier experiments measured **end-to-end chat message rate** with multiple **`s
 
 | Tier | AWS target | Notes |
 |------|------------|--------|
-| **server-v2 / consumer-v3** | **EKS** (`k8s/` + ECR images) | Ingress / ALB for HTTP + WebSocket |
+| **server-v2 / consumer-v3** | **EC2** / **ASG** (`deployment/terraform/` + JAR files) | ALB for HTTP + WebSocket; Auto Scaling Groups for elasticity |
 | **PostgreSQL** | **RDS** (primary + optional **read replica** for `server.metrics.read-replica.jdbc-url`) or **RDS + PgBouncer** | Ingest / MV **REFRESH** on primary; **`/metrics` SELECTs** on replica JDBC when enabled |
-| **RabbitMQ** | **EC2** with **gp3** root volume (Terraform `rabbitmq_root_volume_*`) **or** **Amazon MQ** | See **RabbitMQ on AWS** below |
-| **Redis** | **ElastiCache** (same VPC as EKS nodes) | Open **6379** from the EKS **node** security group |
-| **Load / grading client** | **Off-cluster** | Document public Ingress URL in the PDF |
+| **RabbitMQ** | **EC2** with **gp3** root volume (Terraform `ec2.tf`) **or** **Amazon MQ** | See **RabbitMQ on AWS** below |
+| **Redis** | **ElastiCache** (or EC2 Redis) | Open **6379** for the application security group |
+| **Load / grading client** | **Off-cluster (e.g., JMeter on EC2)** | Document public ALB URL in the report |
 
-Terraform: **`deployment/terraform/`** — use **`use_rds_postgres`** / **`use_amazon_mq`** for managed DB/MQ. **In-cluster** Postgres/Rabbit in `k8s/` is for lab savings; for a single coherent AWS story, move to **RDS + Amazon MQ + ElastiCache** and update **ConfigMap/Secret** (avoid running two copies of the data plane).
+Terraform: **`deployment/terraform/`** — use **`use_rds_postgres`** / **`use_amazon_mq`** for managed DB/MQ. For a single coherent AWS story, move to **RDS + Amazon MQ + ElastiCache** and update application configuration (avoid running two copies of the data plane).
 
 ### RabbitMQ on AWS: gp3 vs cluster / mirroring
 

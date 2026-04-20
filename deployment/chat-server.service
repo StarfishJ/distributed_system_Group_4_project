@@ -4,8 +4,9 @@ After=network.target
 
 [Service]
 User=ec2-user
-WorkingDirectory=/home/ec2-user/server-v2
-ExecStart=/usr/bin/java -Dspring.rabbitmq.host=YOUR_RABBITMQ_IP -jar chat-server.jar
+WorkingDirectory=/home/ec2-user/app
+EnvironmentFile=-/home/ec2-user/app/server.env
+ExecStart=/usr/bin/java -Dreactor.netty.ioWorkerCount=32 -XX:+UseG1GC -Xms1g -Xmx1g -jar /home/ec2-user/app/server-v2.jar
 Restart=always
 RestartSec=10
 StandardOutput=syslog

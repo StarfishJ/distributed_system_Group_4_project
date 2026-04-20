@@ -2,16 +2,16 @@
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
     <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="[Approach A] Stress: 2 Thread Groups, 500 users, 30 min" enabled="true">
-      <stringProp name="TestPlan.comments">Approach A: two Thread Groups (350 health + 150 metrics), throughput caps per group. Assignment stress: 500 users, 30 min, ~70/30 by thread split. Target ~400K samples if SUT keeps up. No /api/messages.</stringProp>
+      <stringProp name="TestPlan.comments">500 users (350+150), 30 min, ~70/30. Ramp 270s. Constant Throughput: 11667 + 5000 samples/min per thread GROUP (calcMode 2 = AllActiveThreadsInCurrentThreadGroup) → ~500K HTTP / 30 min (rubric upper band). Slower req/s than baseline is expected (baseline has no throughput cap). CLI: -Jramp_sec -Jduration_sec -Jwrite_group_startup_delay_sec.</stringProp>
       <boolProp name="TestPlan.functional_mode">false</boolProp>
       <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
       <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
     </TestPlan>
     <hashTree>
-      <!-- ~70% of 500 users; throughput timer = 280000/30 min -->
+      <!-- ~70% of 500 users; group cap 11667 health samples/min -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="01_Read_70pct_GET_health" enabled="true">
         <stringProp name="ThreadGroup.num_threads">${__P(read_threads,350)}</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,120)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,270)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
@@ -23,11 +23,11 @@
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
       </ThreadGroup>
       <hashTree>
-        <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="org.apache.jmeter.timers.ConstantThroughputTimer" testname="Cap ~70pct share of 400K/30min" enabled="true">
+        <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="org.apache.jmeter.timers.ConstantThroughputTimer" testname="Cap GET /health (samples/min, group)" enabled="true">
           <intProp name="calcMode">2</intProp>
           <doubleProp>
             <name>throughput</name>
-            <value>9333.0</value>
+            <value>11667.0</value>
             <savedValue>0.0</savedValue>
           </doubleProp>
         </ConstantThroughputTimer>
@@ -41,9 +41,10 @@
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding"></stringProp>
           <stringProp name="HTTPSampler.path"></stringProp>
-          <stringProp name="HTTPSampler.concurrentPool">6</stringProp>
-          <stringProp name="HTTPSampler.connect_timeout">15000</stringProp>
-          <stringProp name="HTTPSampler.response_timeout">15000</stringProp>
+          <boolProp name="HTTPSampler.concurrentDwn">true</boolProp>
+          <stringProp name="HTTPSampler.concurrentPool">12</stringProp>
+          <stringProp name="HTTPSampler.connect_timeout">60000</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">120000</stringProp>
         </ConfigTestElement>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET /health" enabled="true">
@@ -70,10 +71,10 @@
           <hashTree/>
         </hashTree>
       </hashTree>
-      <!-- ~30% of 500 users; 120000/30 min = 4000/min -->
+      <!-- ~30% of 500 users; group cap 5000 metrics samples/min -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="02_Heavy_30pct_GET_metrics" enabled="true">
         <stringProp name="ThreadGroup.num_threads">${__P(write_threads,150)}</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,120)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(ramp_sec,270)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
@@ -81,15 +82,15 @@
           <stringProp name="LoopController.loops">-1</stringProp>
         </elementProp>
         <stringProp name="ThreadGroup.duration">${__P(duration_sec,1800)}</stringProp>
-        <stringProp name="ThreadGroup.delay"></stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(write_group_startup_delay_sec,120)}</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
       </ThreadGroup>
       <hashTree>
-        <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="org.apache.jmeter.timers.ConstantThroughputTimer" testname="Cap ~30pct share of 400K/30min" enabled="true">
+        <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="org.apache.jmeter.timers.ConstantThroughputTimer" testname="Cap GET /metrics (samples/min, group)" enabled="true">
           <intProp name="calcMode">2</intProp>
           <doubleProp>
             <name>throughput</name>
-            <value>4000.0</value>
+            <value>5000.0</value>
             <savedValue>0.0</savedValue>
           </doubleProp>
         </ConstantThroughputTimer>
@@ -103,7 +104,8 @@
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.contentEncoding"></stringProp>
           <stringProp name="HTTPSampler.path"></stringProp>
-          <stringProp name="HTTPSampler.concurrentPool">6</stringProp>
+          <boolProp name="HTTPSampler.concurrentDwn">true</boolProp>
+          <stringProp name="HTTPSampler.concurrentPool">12</stringProp>
           <stringProp name="HTTPSampler.connect_timeout">60000</stringProp>
           <stringProp name="HTTPSampler.response_timeout">120000</stringProp>
         </ConfigTestElement>

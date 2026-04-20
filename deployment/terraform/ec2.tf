@@ -39,8 +39,9 @@ resource "aws_instance" "postgres" {
   }
 }
 
+# server-v2 / consumer-v3: plain EC2 when enable_asg_s3_app_tier=false; else ASG+S3 in asg_app.tf
 resource "aws_instance" "server" {
-  count                  = local.create_app_ec2 ? var.server_count : 0
+  count                  = local.create_app_ec2 && !local.create_asg_s3_app ? var.server_count : 0
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type_server
   key_name               = local.ec2_key_name
@@ -56,17 +57,17 @@ resource "aws_instance" "server" {
 }
 
 resource "aws_instance" "consumer" {
-  count                  = local.create_app_ec2 ? 1 : 0
+  count                  = local.create_app_ec2 && !local.create_asg_s3_app ? var.consumer_count : 0
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.instance_type_consumer
   key_name               = local.ec2_key_name
-  subnet_id              = aws_subnet.public[1].id
+  subnet_id              = aws_subnet.public[count.index % 2].id
   vpc_security_group_ids = [aws_security_group.internal.id]
 
   user_data = local.user_data_base
 
   tags = {
-    Name = "${var.project_name}-consumer"
+    Name = "${var.project_name}-consumer-${count.index + 1}"
     Role = "consumer-v3"
   }
 }

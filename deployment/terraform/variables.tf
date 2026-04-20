@@ -74,6 +74,29 @@ variable "server_count" {
   default     = 2
 }
 
+variable "consumer_count" {
+  type        = number
+  description = "Number of consumer-v3 EC2 instances (only when enable_eks = false); share same RabbitMQ/Postgres/Redis"
+  default     = 2
+
+  validation {
+    condition     = var.consumer_count >= 1 && var.consumer_count <= 10
+    error_message = "consumer_count must be between 1 and 10."
+  }
+}
+
+variable "asg_health_check_grace_period" {
+  type        = number
+  description = "Seconds before ELB health checks affect ASG (S3 download + JVM start)"
+  default     = 420
+}
+
+variable "enable_asg_s3_app_tier" {
+  type        = bool
+  description = "true = Auto Scaling + S3 bootstrap + IAM role for EC2 (requires iam:CreateRole). false = fixed EC2 + deploy-ec2.ps1 over SSH (AWS Academy / Vocareum)."
+  default     = false
+}
+
 variable "instance_type_rabbitmq" {
   type    = string
   default = "t3.small"
@@ -119,6 +142,23 @@ variable "enable_alb" {
   default     = true
 }
 
+variable "alb_idle_timeout" {
+  type        = number
+  description = "ALB idle timeout in seconds (1-4000). Default 60s drops quiet TCP connections; 3600 helps WebSocket/chat survive idle periods."
+  default     = 3600
+
+  validation {
+    condition     = var.alb_idle_timeout >= 1 && var.alb_idle_timeout <= 4000
+    error_message = "alb_idle_timeout must be between 1 and 4000 (AWS ALB limit)."
+  }
+}
+
+variable "alb_health_check_path" {
+  type        = string
+  description = "Target group health check path (must match server-v2, e.g. GET /health)."
+  default     = "/health"
+}
+
 # --- Managed AWS services (recommended vs self-hosted EC2) ---
 
 variable "use_amazon_mq" {
@@ -131,6 +171,30 @@ variable "use_rds_postgres" {
   type        = bool
   description = "Use RDS PostgreSQL instead of EC2 postgres instance"
   default     = false
+}
+
+variable "use_rds_read_replica" {
+  type        = bool
+  description = "Create a same-region RDS PostgreSQL read replica for read-only queries"
+  default     = false
+}
+
+variable "use_elasticache_redis" {
+  type        = bool
+  description = "Provision Amazon ElastiCache for Redis for server/consumer (Spring Data Redis). When true, deploy-ec2.ps1 skips Docker Redis on Postgres/Rabbit EC2."
+  default     = true
+}
+
+variable "elasticache_node_type" {
+  type        = string
+  description = "ElastiCache Redis node type (lab-friendly default)"
+  default     = "cache.t3.micro"
+}
+
+variable "elasticache_redis_engine_version" {
+  type        = string
+  description = "Redis engine version for ElastiCache (must be available in the region)"
+  default     = "7.1"
 }
 
 variable "create_ec2_rabbitmq" {
@@ -176,6 +240,12 @@ variable "rds_instance_class" {
   default = "db.t3.micro"
 }
 
+variable "rds_read_replica_instance_class" {
+  type        = string
+  description = "Optional instance class for RDS read replica; when null, uses rds_instance_class"
+  default     = null
+}
+
 variable "rds_engine_version" {
   type    = string
   default = "16"
@@ -194,4 +264,30 @@ variable "rds_database_name" {
 variable "rds_master_username" {
   type    = string
   default = "chat"
+}
+
+# --- Optional JMeter load-generator EC2 (same region as ALB) ---
+
+variable "enable_jmeter_ec2" {
+  type        = bool
+  description = "When true (and enable_eks=false, enable_alb=true), provision a small EC2 with Java + Apache JMeter under /opt/apache-jmeter for load tests against the ALB."
+  default     = false
+}
+
+variable "instance_type_jmeter" {
+  type        = string
+  description = "Instance type for the JMeter host (t3.large+ recommended for stress-30min)."
+  default     = "t3.large"
+}
+
+variable "jmeter_version" {
+  type        = string
+  description = "Apache JMeter version to download from archive.apache.org"
+  default     = "5.6.3"
+}
+
+variable "jmeter_root_volume_size" {
+  type        = number
+  description = "Root EBS size (GiB) for JMeter EC2 — JTL/HTML reports need space."
+  default     = 30
 }

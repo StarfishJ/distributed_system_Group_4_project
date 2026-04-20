@@ -43,6 +43,14 @@ resource "aws_security_group" "internal" {
   }
 
   ingress {
+    description     = "HTTP from ALB to consumer-v3 (actuator health)"
+    from_port       = 8081
+    to_port         = 8081
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
     description = "Internal: all from same SG"
     from_port   = 0
     to_port     = 0

@@ -34,6 +34,8 @@ replay_pid*
 # Per-run CSV/JSON can be millions of lines — regenerate locally after clone.
 *.csv
 !load-tests/results/batch_optimization.csv
+*.jtl
+**/results/*-report/
 **/metrics_last.json
 
 # --- IDE ---
